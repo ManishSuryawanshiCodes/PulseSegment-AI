@@ -70,28 +70,43 @@ PulseSegment AI is 100% dataset-agnostic. Follow these 4 steps to segment any cu
 
 ---
 
+---
+
+## One-Command Quick Start
+
+### Option A: Docker Compose (Recommended)
+Start both backend and frontend simultaneously with a single command:
+```bash
+docker compose up --build
+```
+- Frontend Dashboard: `http://localhost:3000`
+- Backend API & Interactive Docs: `http://localhost:8000/docs`
+
+---
+
 ## Local Development & Setup
 
 ### Prerequisites
 - Python 3.10+
 - Node.js 18+ and pnpm
 
-### Backend (FastAPI + Scikit-Learn)
+### 1. Backend (FastAPI + Scikit-Learn)
 ```bash
 cd backend
+pip install -r requirements.txt
 python -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload
 ```
-Interactive API documentation is available at `http://localhost:8000/docs`.
+Interactive API documentation is live at `http://localhost:8000/docs`.
 
-### Frontend (Next.js 15 App Router + Tailwind CSS)
+### 2. Frontend (Next.js 15 App Router + Tailwind CSS)
 ```bash
 cd frontend
+pnpm install
 pnpm dev
 ```
-Interactive dashboard is available at `http://localhost:3000`.
+Interactive dashboard is live at `http://localhost:3000`.
 
-### Running Automated Test Suite
+### 3. Automated Test Suite
 ```bash
-cd backend
-python -m pytest tests/test_pipeline.py -v
+python -m pytest backend/tests/test_pipeline.py -v
 ```

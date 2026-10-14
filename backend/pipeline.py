@@ -34,7 +34,109 @@ from models import (
     NBACampaign,
     GrowthPersonas,
     PredictSegmentResponse,
+    ClusterBoxPlotStat,
+    FeatureBoxPlot,
 )
+
+# Standard sampling constants across pipeline, API, and documentation
+SILHOUETTE_SAMPLE_THRESHOLD = 8000
+SILHOUETTE_SAMPLE_SIZE = 5000
+
+DOMAIN_DIRECTION_MAP = {
+    "ecommerce_rfm": {
+        "recency": "lower_is_better",
+        "return_rate": "lower_is_better",
+        "frequency": "higher_is_better",
+        "monetary": "higher_is_better",
+        "avg_order_value": "higher_is_better",
+        "orders": "higher_is_better",
+        "churn": "lower_is_better",
+    },
+    "credit_card": {
+        "purchases": "higher_is_better",
+        "purchases_frequency": "higher_is_better",
+        "oneoff_purchases": "higher_is_better",
+        "installments_purchases": "higher_is_better",
+        "payments": "higher_is_better",
+        "credit_limit": "higher_is_better",
+        "prc_full_payment": "higher_is_better",
+        "cash_advance": "lower_is_better",
+        "cash_advance_frequency": "lower_is_better",
+        "cash_advance_trx": "lower_is_better",
+        "balance": "neutral",
+    },
+    "saas": {
+        "mrr": "higher_is_better",
+        "seats": "higher_is_better",
+        "logins": "higher_is_better",
+        "usage": "higher_is_better",
+        "growth": "higher_is_better",
+        "churn_risk": "lower_is_better",
+    },
+    "generic": {},
+}
+
+
+def get_column_direction(domain: str, col_name: str) -> str:
+    col_lower = col_name.lower()
+    domain_map = DOMAIN_DIRECTION_MAP.get(domain, {})
+    for key, direction in domain_map.items():
+        if key in col_lower:
+            return direction
+    if any(k in col_lower for k in ["recency", "days_since", "return_rate", "churn", "risk", "bounce"]):
+        return "lower_is_better"
+    if any(k in col_lower for k in ["monetary", "revenue", "spend", "purchases", "frequency", "orders", "growth", "logins", "mrr", "seats", "payment"]):
+        return "higher_is_better"
+    return "neutral"
+
+
+def format_trait_wording(col_name: str, z: float, domain: str) -> str:
+    direction = get_column_direction(domain, col_name)
+    col_lower = col_name.lower()
+
+    if "recency" in col_lower or "days_since" in col_lower:
+        if z < -0.3:
+            return "Bought recently"
+        elif z > 0.3:
+            return "Lapsed / Long time since purchase"
+        else:
+            return "Moderate recency"
+
+    if "return_rate" in col_lower:
+        if z > 0.3:
+            return "Return-prone"
+        elif z < -0.3:
+            return "Low return rate"
+        else:
+            return "Normal returns"
+
+    clean_name = col_name.replace("_", " ").title()
+    if direction == "lower_is_better":
+        if z < -0.3:
+            return f"Favorable low {clean_name}"
+        elif z > 0.3:
+            return f"High {clean_name}"
+    elif direction == "higher_is_better":
+        if z > 0.3:
+            return f"High {clean_name}"
+        elif z < -0.3:
+            return f"Below-average {clean_name}"
+    else:
+        if z > 0.3:
+            return f"High {clean_name}"
+        elif z < -0.3:
+            return f"Low {clean_name}"
+
+    return f"Moderate {clean_name}"
+
+
+def get_feature_z(z_dict: Dict[str, float], *patterns: str) -> float:
+    for pat in patterns:
+        pat_lower = pat.lower()
+        for k, v in z_dict.items():
+            if pat_lower == k.lower() or pat_lower in k.lower():
+                return float(v)
+    return 0.0
 
 
 class PulseSegmentPipeline:
@@ -138,7 +240,17 @@ class PulseSegmentPipeline:
         if has_missing:
             k = min(self.config.imputation_k, max(1, len(df_num) - 1))
             self._imputer = KNNImputer(n_neighbors=k)
-            imputed_arr = self._imputer.fit_transform(df_num)
+            if len(df_num) > 3000:
+                complete_df = df_num.dropna()
+                train_data = (
+                    complete_df.sample(n=min(3000, len(complete_df)), random_state=42)
+                    if len(complete_df) >= k
+                    else df_num.sample(n=min(3000, len(df_num)), random_state=42)
+                )
+                self._imputer.fit(train_data)
+                imputed_arr = self._imputer.transform(df_num)
+            else:
+                imputed_arr = self._imputer.fit_transform(df_num)
             imputed_df = pd.DataFrame(imputed_arr, columns=self._feature_names, index=df_num.index)
         else:
             imputed_df = df_num.copy()
@@ -321,12 +433,16 @@ class PulseSegmentPipeline:
         k_mi = min(k_mi, n_features)
 
         # Unsupervised pseudo-label generation via preliminary KMeans
-        prelim_km = KMeans(n_clusters=self.config.n_clusters, random_state=42, n_init=5)
+        prelim_km = KMeans(n_clusters=self.config.n_clusters, random_state=42, n_init=2)
         pseudo_labels = prelim_km.fit_predict(ds1)
 
         try:
             selector = SelectKBest(score_func=mutual_info_classif, k=k_mi)
-            selector.fit(ds1, pseudo_labels)
+            if len(ds1) > 2500:
+                idx_sub = np.random.RandomState(42).choice(len(ds1), size=2500, replace=False)
+                selector.fit(ds1.iloc[idx_sub], pseudo_labels[idx_sub])
+            else:
+                selector.fit(ds1, pseudo_labels)
             mi_scores = {col: round(float(score), 4) for col, score in zip(feature_names, selector.scores_)}
             selected_indices = selector.get_support(indices=True)
             ds3_features = [feature_names[i] for i in selected_indices]
@@ -481,10 +597,10 @@ class PulseSegmentPipeline:
             auto_eps = self._estimate_dbscan_eps(X, min_samples=15)
 
             algorithms = [
-                ("KMeans", KMeans(n_clusters=k_clusters, init="k-means++", n_init=10, random_state=42)),
+                ("KMeans", KMeans(n_clusters=k_clusters, init="k-means++", n_init=3, random_state=42)),
                 ("Agglomerative", AgglomerativeClustering(n_clusters=k_clusters, linkage="ward")),
                 ("DBSCAN", DBSCAN(eps=auto_eps, min_samples=15)),
-                ("GaussianMixture", GaussianMixture(n_components=k_clusters, covariance_type="full", random_state=42)),
+                ("GaussianMixture", GaussianMixture(n_components=k_clusters, covariance_type="full", reg_covar=1e-4, max_iter=60, random_state=42)),
             ]
 
             for alg_name, model in algorithms:
@@ -494,10 +610,10 @@ class PulseSegmentPipeline:
                 if job_callback:
                     job_callback(completed_step, total_steps, f"Running {alg_name} on {dname} ({dim_str})...")
 
-                # Sample Agglomerative if N > 10,000 to prevent O(N^2) memory crash
+                # Sample Agglomerative if N > 3000 to prevent O(N^2) latency
                 is_agglom_sampled = False
-                if alg_name == "Agglomerative" and n_rows > 10000:
-                    agglom_idx = np.random.choice(n_rows, size=10000, replace=False)
+                if alg_name == "Agglomerative" and n_rows > 3000:
+                    agglom_idx = np.random.RandomState(42).choice(n_rows, size=3000, replace=False)
                     X_fit = X[agglom_idx]
                     is_agglom_sampled = True
                 else:
@@ -535,6 +651,7 @@ class PulseSegmentPipeline:
                 status_str = "success"
                 reason_str: Optional[str] = None
                 sampled_sil = False
+                sample_size_used = None
 
                 if cluster_count >= 2:
                     valid_mask = ~noise_mask if noise_count > 0 else np.ones(n_rows, dtype=bool)
@@ -542,12 +659,13 @@ class PulseSegmentPipeline:
                     labels_eval = labels[valid_mask]
 
                     if len(set(labels_eval)) >= 2:
-                        # Silhouette sampling if N > 8000
-                        if len(labels_eval) > 8000:
-                            sil_idx = np.random.choice(len(labels_eval), size=5000, replace=False)
+                        # Silhouette sampling if N > SILHOUETTE_SAMPLE_THRESHOLD (8000)
+                        if len(labels_eval) > SILHOUETTE_SAMPLE_THRESHOLD:
+                            sil_idx = np.random.RandomState(42).choice(len(labels_eval), size=SILHOUETTE_SAMPLE_SIZE, replace=False)
                             X_sil = X_eval[sil_idx]
                             l_sil = labels_eval[sil_idx]
                             sampled_sil = True
+                            sample_size_used = SILHOUETTE_SAMPLE_SIZE
                         else:
                             X_sil = X_eval
                             l_sil = labels_eval
@@ -589,6 +707,7 @@ class PulseSegmentPipeline:
                     "cluster_count": cluster_count,
                     "noise_percentage": noise_percentage,
                     "sampled_silhouette": sampled_sil,
+                    "silhouette_sample_size": sample_size_used,
                     "status": status_str,
                     "reason": reason_str,
                     "scatter_data": scatter_data,
@@ -625,7 +744,8 @@ class PulseSegmentPipeline:
                 comp = round(float((norm_sil + norm_dbi + norm_ch) / 3.0), 4)
                 r["composite_score"] = comp
 
-            winning = max(valid_candidates, key=lambda x: x["composite_score"])
+            k_candidates = [r for r in valid_candidates if r["cluster_count"] == self.config.n_clusters]
+            winning = max(k_candidates if k_candidates else valid_candidates, key=lambda x: x["composite_score"])
         else:
             winning = results[0]
 
@@ -685,25 +805,23 @@ class PulseSegmentPipeline:
         total_records = len(labels)
         df_unscaled = self._prepare_raw_features().fillna(self._prepare_raw_features().median(numeric_only=True))
 
-        unique_clusters = sorted([c for c in set(labels) if c != -1])
-        if len(unique_clusters) == 0:
-            unique_clusters = [0]
-            labels = np.zeros(total_records, dtype=int)
+        target_k = self.config.n_clusters
+        all_cluster_ids = list(range(target_k))
 
         cluster_counts = {}
         cluster_means = {}
         cluster_zscores = {}
 
-        for c in unique_clusters:
+        for c in all_cluster_ids:
             mask = (labels == c)
             cnt = int(np.sum(mask))
             cluster_counts[c] = cnt
 
-            sub_df = df_unscaled[mask]
+            sub_df = df_unscaled[mask] if np.any(mask) else df_unscaled
             means = {}
             zscores = {}
             for col in self._feature_names:
-                c_mean = float(sub_df[col].mean()) if len(sub_df) > 0 else 0.0
+                c_mean = float(sub_df[col].mean()) if len(sub_df) > 0 else self._global_means.get(col, 0.0)
                 g_mean = self._global_means.get(col, 0.0)
                 g_std = self._global_stds.get(col, 1.0)
                 z = (c_mean - g_mean) / (g_std + 1e-6)
@@ -714,21 +832,22 @@ class PulseSegmentPipeline:
             cluster_means[c] = means
             cluster_zscores[c] = zscores
 
-        # Rank distinguishing attributes
+        # Rank distinguishing attributes & assign domain archetypes
         domain = self.config.domain_template
-        personas_list = []
         palette = ["#6366F1", "#10B981", "#F59E0B", "#F43F5E", "#8B5CF6", "#06B6D4", "#EC4899", "#14B8A6"]
 
         cluster_assignments = self._assign_archetypes(
             domain=domain,
-            unique_clusters=unique_clusters,
+            target_k=target_k,
+            all_cluster_ids=all_cluster_ids,
             cluster_zscores=cluster_zscores,
             cluster_counts=cluster_counts,
         )
 
-        for idx, c in enumerate(unique_clusters):
+        personas_list = []
+        for idx, c in enumerate(all_cluster_ids):
             cnt = cluster_counts[c]
-            pct = round((cnt / total_records) * 100.0, 2)
+            pct = round((cnt / total_records) * 100.0, 2) if total_records > 0 else 0.0
             z_dict = cluster_zscores[c]
             m_dict = cluster_means[c]
 
@@ -739,6 +858,7 @@ class PulseSegmentPipeline:
                     z_score=v,
                     cluster_mean=m_dict[k],
                     global_mean=round(self._global_means.get(k, 0.0), 2),
+                    interpretation=format_trait_wording(k, v, domain),
                 )
                 for k, v in sorted_z if v > 0
             ][:3]
@@ -749,6 +869,7 @@ class PulseSegmentPipeline:
                     z_score=v,
                     cluster_mean=m_dict[k],
                     global_mean=round(self._global_means.get(k, 0.0), 2),
+                    interpretation=format_trait_wording(k, v, domain),
                 )
                 for k, v in reversed(sorted_z) if v < 0
             ][:3]
@@ -758,7 +879,6 @@ class PulseSegmentPipeline:
 
             # Dynamic ROI modeling based on real segment size
             avg_rev = 120.0
-            # If a spending/monetary feature exists, use its mean
             for rev_candidate in ["PURCHASES", "PAYMENTS", "monetary", "revenue", "mrr", "amount"]:
                 for feat in self._feature_names:
                     if rev_candidate in feat.lower():
@@ -809,7 +929,30 @@ class PulseSegmentPipeline:
                 )
             )
 
+        # Compute per-cluster box plot statistics for top features (up to 6 features)
+        top_feature_candidates = self._feature_names[:6]
+        box_plots_list = []
+        for feat in top_feature_candidates:
+            cluster_stat_map = {}
+            for c in all_cluster_ids:
+                p_name = cluster_assignments[c][0]
+                mask = (labels == c)
+                c_vals = df_unscaled.loc[mask, feat].dropna() if np.any(mask) else pd.Series([self._global_means.get(feat, 0.0)])
+                if len(c_vals) == 0:
+                    c_vals = pd.Series([self._global_means.get(feat, 0.0)])
+                cluster_stat_map[p_name] = ClusterBoxPlotStat(
+                    min=round(float(c_vals.min()), 2),
+                    q1=round(float(c_vals.quantile(0.25)), 2),
+                    median=round(float(c_vals.median()), 2),
+                    q3=round(float(c_vals.quantile(0.75)), 2),
+                    max=round(float(c_vals.max()), 2),
+                )
+            box_plots_list.append(FeatureBoxPlot(feature=feat, clusters=cluster_stat_map))
+
+        # Per-column direction map for the active features
+        direction_map = {feat: get_column_direction(domain, feat) for feat in self._feature_names}
         win_exp = self._experiments_cache.get("winning_experiment", {})
+
         self._personas_cache = {
             "dataset_id": self.dataset_id,
             "personas": personas_list,
@@ -817,6 +960,8 @@ class PulseSegmentPipeline:
             "winning_silhouette": win_exp.get("silhouette_score"),
             "winning_dbi": win_exp.get("davies_bouldin_index"),
             "domain_template": domain,
+            "box_plots": [b.model_dump() for b in box_plots_list],
+            "direction_map": direction_map,
         }
 
         return self._personas_cache
@@ -824,22 +969,21 @@ class PulseSegmentPipeline:
     def _assign_archetypes(
         self,
         domain: str,
-        unique_clusters: List[int],
+        target_k: int,
+        all_cluster_ids: List[int],
         cluster_zscores: Dict[int, Dict[str, float]],
         cluster_counts: Dict[int, int],
     ) -> Dict[int, Tuple[str, List[str], List[Dict[str, str]]]]:
         """
         Maps clusters to domain archetypes via maximum alignment on behavioral z-scores,
-        ensuring each cluster receives a distinct, appropriate persona with zero collision.
+        inverting recency z-scores (high recency = bad, low recency = bought recently),
+        guaranteeing exactly target_k personas with unique names per cluster (using ' (2)' suffixes on duplicates).
         """
-        assignments: Dict[int, Tuple[str, List[str], List[Dict[str, str]]]] = {}
-        unassigned_clusters = set(unique_clusters)
-
         if domain == "credit_card":
             archetypes = [
                 (
                     "VIP Omnichannel Spenders",
-                    lambda z: 2.0 * z.get("PURCHASES", 0.0) + 1.8 * z.get("ONEOFF_PURCHASES", 0.0) + 1.0 * z.get("CREDIT_LIMIT", 0.0) + 0.8 * z.get("PAYMENTS", 0.0),
+                    lambda z: 2.0 * get_feature_z(z, "purchases") + 1.8 * get_feature_z(z, "oneoff_purchases") + 1.0 * get_feature_z(z, "credit_limit") + 0.8 * get_feature_z(z, "payments"),
                     [
                         "High spending volume and elevated credit facility tier",
                         "Significant one-off capital expenditures and high transaction volume",
@@ -852,7 +996,7 @@ class PulseSegmentPipeline:
                 ),
                 (
                     "Transactors",
-                    lambda z: 2.2 * z.get("PURCHASES_FREQUENCY", 0.0) + 1.8 * z.get("PURCHASES_INSTALLMENTS_FREQUENCY", 0.0) + 1.2 * z.get("ONEOFF_PURCHASES_FREQUENCY", 0.0) + 1.0 * z.get("PRC_FULL_PAYMENT", 0.0) - 1.5 * z.get("CASH_ADVANCE_FREQUENCY", 0.0),
+                    lambda z: 2.2 * get_feature_z(z, "purchases_frequency") + 1.8 * get_feature_z(z, "purchases_installments_frequency") + 1.2 * get_feature_z(z, "oneoff_purchases_frequency") + 1.0 * get_feature_z(z, "prc_full_payment") - 1.5 * get_feature_z(z, "cash_advance_frequency"),
                     [
                         "Frequent day-to-day card utilization for merchant purchases",
                         "Consistently settles balances in full with low revolving balances",
@@ -865,7 +1009,7 @@ class PulseSegmentPipeline:
                 ),
                 (
                     "Revolvers",
-                    lambda z: 2.0 * z.get("CASH_ADVANCE_FREQUENCY", 0.0) + 1.8 * z.get("CASH_ADVANCE_TRX", 0.0) + 1.5 * z.get("CASH_ADVANCE", 0.0) + 1.0 * z.get("BALANCE", 0.0) - 1.0 * z.get("PRC_FULL_PAYMENT", 0.0),
+                    lambda z: 2.0 * get_feature_z(z, "cash_advance_frequency") + 1.8 * get_feature_z(z, "cash_advance_trx") + 1.5 * get_feature_z(z, "cash_advance") + 1.0 * get_feature_z(z, "balance") - 1.0 * get_feature_z(z, "prc_full_payment"),
                     [
                         "Carries substantial revolving balances and high cash advance utilization",
                         "High interest yield generator with minimal full payment propensity",
@@ -878,7 +1022,7 @@ class PulseSegmentPipeline:
                 ),
                 (
                     "Dormant / At-Risk",
-                    lambda z: - 2.0 * z.get("PURCHASES_FREQUENCY", 0.0) - 1.5 * z.get("PURCHASES", 0.0) - 1.2 * z.get("PURCHASES_TRX", 0.0) - 1.0 * z.get("CASH_ADVANCE_TRX", 0.0),
+                    lambda z: - 2.0 * get_feature_z(z, "purchases_frequency") - 1.5 * get_feature_z(z, "purchases") - 1.2 * get_feature_z(z, "purchases_trx") - 1.0 * get_feature_z(z, "cash_advance_trx"),
                     [
                         "Minimal transaction activity and low revolving utilization",
                         "Static account with declining touchpoints over trailing periods",
@@ -893,12 +1037,13 @@ class PulseSegmentPipeline:
         elif domain == "ecommerce_rfm":
             archetypes = [
                 (
-                    "Champions & Brand Advocates",
-                    lambda z: 2.0 * z.get("MONETARY", 0.0) + 1.5 * z.get("FREQUENCY", 0.0) - 1.0 * z.get("RECENCY", 0.0),
+                    "Champions",
+                    # high FREQUENCY + high MONETARY + low RECENCY (inv_recency_z > 0)
+                    lambda z: 2.0 * get_feature_z(z, "frequency", "orders") + 2.0 * get_feature_z(z, "monetary", "revenue", "spend", "purchases", "amount") - 1.5 * get_feature_z(z, "recency", "days_since"),
                     [
-                        "Exceptional lifetime spend with consistent recurring purchases",
-                        "High brand affinity and strong retention propensity",
-                        "Prime candidate for referral programs and VIP communities",
+                        "High order frequency, high monetary spend, and bought recently (low recency)",
+                        "Top-tier lifetime customer value with dependable repeat buying cycles",
+                        "Prime candidates for loyalty VIP rewards and exclusive ambassador programs",
                     ],
                     [
                         {"title": "VIP Early Access & Tiered Loyalty Rewards", "description": "Grant exclusive early access to upcoming product launches and private sales.", "channel": "Email & SMS"},
@@ -906,42 +1051,59 @@ class PulseSegmentPipeline:
                     ],
                 ),
                 (
-                    "Loyal High-Frequency Shoppers",
-                    lambda z: 2.2 * z.get("FREQUENCY", 0.0) + 1.2 * z.get("AVG_ORDER_VALUE", 0.0),
+                    "Recent / Promising",
+                    # low recency (bought recently) + moderate spend
+                    lambda z: - 2.5 * get_feature_z(z, "recency", "days_since") + 1.0 * get_feature_z(z, "monetary", "revenue", "spend", "purchases", "amount") - 0.5 * abs(get_feature_z(z, "monetary", "revenue", "spend", "purchases", "amount")),
                     [
-                        "Dependable frequent ordering cycles throughout the calendar",
-                        "High response rates to product replenishment triggers",
-                        "Moderate basket sizes with steady cumulative value",
+                        "Bought recently with moderate order value and fresh brand momentum",
+                        "High response probability during post-purchase onboarding window",
+                        "High potential to graduate into core recurring purchasers",
+                    ],
+                    [
+                        {"title": "Second Purchase Accelerator Discount", "description": "Trigger limited-time voucher for second order within 14 days of receipt.", "channel": "SMS & Email"},
+                        {"title": "Curated Product Discovery Guide", "description": "Educate buyers on best-sellers and top customer favorites.", "channel": "In-App Notification"},
+                    ],
+                ),
+                (
+                    "At-Risk / Lapsed",
+                    # high RECENCY (lapsed) + low FREQUENCY
+                    lambda z: 2.5 * get_feature_z(z, "recency", "days_since") - 1.5 * get_feature_z(z, "frequency", "orders"),
+                    [
+                        "High recency (lapsed) with low purchase frequency",
+                        "Extended duration since last order requiring targeted reactivation",
+                        "Critical churn threshold requiring aggressive win-back campaigns",
+                    ],
+                    [
+                        {"title": "Dynamic Win-Back Re-Engagement Offer", "description": "Deploy personalized reactivation coupon tailored to past basket categories.", "channel": "Omnichannel Push & Email"},
+                        {"title": "Customer Re-Engagement Feedback Survey", "description": "Identify reasons for dormancy with a friction audit.", "channel": "Email & SMS"},
+                    ],
+                ),
+                (
+                    "Return-Prone Shoppers",
+                    # high RETURN_RATE
+                    lambda z: 3.0 * get_feature_z(z, "return_rate", "returns") + 0.5 * get_feature_z(z, "frequency", "orders"),
+                    [
+                        "High return rate relative to portfolio average (Return-prone)",
+                        "Active order placement accompanied by frequent merchandise returns",
+                        "Requires sizing/spec guidance and dedicated return-friction resolution",
+                    ],
+                    [
+                        {"title": "Personalized Sizing & Fit Assistance", "description": "Provide smart sizing guides and consultation to minimize return rate.", "channel": "Email & In-App Guide"},
+                        {"title": "Exchange Rather Than Refund Incentive", "description": "Encourage instant exchange with bonus store credit.", "channel": "Checkout Recommendations"},
+                    ],
+                ),
+                (
+                    "Loyal Regular Shoppers",
+                    # Steady recurring order cadence
+                    lambda z: 1.8 * get_feature_z(z, "frequency", "orders") + 0.8 * get_feature_z(z, "monetary", "revenue", "spend"),
+                    [
+                        "Consistent recurring purchases with stable basket values",
+                        "Steady engagement with seasonal catalogs and product drops",
+                        "Responsive to cross-category recommendations",
                     ],
                     [
                         {"title": "Automated Subscription & Replenishment Bundles", "description": "Convert frequent purchases into recurring subscription plans with 10% discount.", "channel": "Email & SMS"},
                         {"title": "Cross-Sell Category Expansion Offer", "description": "Promote complementary accessories tailored to past purchases.", "channel": "Checkout Recommendations"},
-                    ],
-                ),
-                (
-                    "At-Risk Churning Customers",
-                    lambda z: 2.0 * z.get("RECENCY", 0.0) + 1.5 * z.get("RETURN_RATE", 0.0) - 1.0 * z.get("FREQUENCY", 0.0),
-                    [
-                        "Long duration since last recorded checkout session",
-                        "Elevated return rates or negative shopping friction indicators",
-                        "Critical churn threshold requiring proactive reactivation",
-                    ],
-                    [
-                        {"title": "Dynamic Win-Back Re-Engagement Offer", "description": "Deploy personalized reactivation coupon tailored to past basket categories.", "channel": "Omnichannel Push & Email"},
-                        {"title": "Frictionless Returns & Concierge Support Check-in", "description": "Address return experience friction with dedicated customer support.", "channel": "Email & SMS"},
-                    ],
-                ),
-                (
-                    "Recent High-Potential Shoppers",
-                    lambda z: - 2.0 * z.get("RECENCY", 0.0) + 1.0 * z.get("MONETARY", 0.0),
-                    [
-                        "Very recent initial or seasonal order with high momentum",
-                        "Fresh engagement window for onboarding nurture sequences",
-                        "Potential to graduate quickly into core loyal segment",
-                    ],
-                    [
-                        {"title": "Second Purchase Accelerator Discount", "description": "Trigger limited-time voucher for second order within 14 days of receipt.", "channel": "SMS & Email"},
-                        {"title": "Curated Product Discovery Guide", "description": "Educate cardholders on best-sellers and top customer favorites.", "channel": "In-App Notification"},
                     ],
                 ),
             ]
@@ -949,7 +1111,7 @@ class PulseSegmentPipeline:
             archetypes = [
                 (
                     "Enterprise Power Users",
-                    lambda z: 2.0 * z.get("MRR", 0.0) + 1.5 * z.get("SEATS", 0.0),
+                    lambda z: 2.0 * get_feature_z(z, "mrr") + 1.5 * get_feature_z(z, "seats"),
                     ["Extensive enterprise license count and top revenue contributor", "Daily active utilization across team members", "High stickiness and low churn risk"],
                     [
                         {"title": "Enterprise Tier Upgrade Consultation", "description": "Engage workspace owners with custom SLA and security add-on proposals.", "channel": "In-App Intercom & Email"},
@@ -958,7 +1120,7 @@ class PulseSegmentPipeline:
                 ),
                 (
                     "Steady Core Operators",
-                    lambda z: 2.0 * z.get("LOGINS", 0.0) + 1.0 * z.get("USAGE", 0.0),
+                    lambda z: 2.0 * get_feature_z(z, "logins") + 1.0 * get_feature_z(z, "usage"),
                     ["Consistent day-to-day workflow integration", "Predictable usage patterns within core features", "Reliable monthly contract renewal"],
                     [
                         {"title": "Product Specialist Workflow Optimization", "description": "Offer complimentary 1-on-1 workflow audit to unlock unutilized features.", "channel": "In-App Banner"},
@@ -967,7 +1129,7 @@ class PulseSegmentPipeline:
                 ),
                 (
                     "Expansion & Upsell Candidates",
-                    lambda z: 1.5 * z.get("SEATS", 0.0) + 1.5 * z.get("GROWTH", 0.0),
+                    lambda z: 1.5 * get_feature_z(z, "seats") + 1.5 * get_feature_z(z, "growth"),
                     ["Rapid seat count additions and growing team adoption", "Approaching tier-specific quota thresholds", "Strong signals of organizational expansion"],
                     [
                         {"title": "Team Seat Bundle Incentive", "description": "Provide volume discount on adding 10+ additional workspace seats.", "channel": "In-App Modal & Billing Alert"},
@@ -976,7 +1138,7 @@ class PulseSegmentPipeline:
                 ),
                 (
                     "At-Risk / Disengaged Workspaces",
-                    lambda z: 2.0 * z.get("CHURN_RISK", 0.0) - 1.5 * z.get("LOGINS", 0.0),
+                    lambda z: 2.0 * get_feature_z(z, "churn_risk", "churn") - 1.5 * get_feature_z(z, "logins"),
                     ["Sharp decline in weekly active user logins", "Stagnant invite acceptance rate and minimal feature utilization", "High churn alert status"],
                     [
                         {"title": "Customer Success Health Intervention", "description": "Proactive check-in from dedicated CSM to troubleshoot blockers.", "channel": "Direct Email & Intercom"},
@@ -987,35 +1149,56 @@ class PulseSegmentPipeline:
         else:
             archetypes = []
 
-        # Assign archetypes in priority order to best matching unassigned cluster
-        for name, score_fn, traits, camps in archetypes:
-            if not unassigned_clusters:
-                break
-            best_c = max(unassigned_clusters, key=lambda c: score_fn(cluster_zscores[c]))
-            assignments[best_c] = (name, traits, camps)
-            unassigned_clusters.remove(best_c)
+        assigned_raw = {}
+        for c in all_cluster_ids:
+            z_c = cluster_zscores.get(c, {})
+            ret_z = get_feature_z(z_c, "return_rate", "returns")
 
-        # For any remaining clusters or generic domain
-        for idx, c in enumerate(sorted(unassigned_clusters)):
-            p_label = chr(65 + idx)
-            z_dict = cluster_zscores[c]
-            sorted_z = sorted(z_dict.items(), key=lambda x: x[1], reverse=True)
-            top_pos_k = sorted_z[0][0] if sorted_z and sorted_z[0][1] > 0 else "Metric A"
-            top_neg_k = sorted_z[-1][0] if sorted_z and sorted_z[-1][1] < 0 else "Metric B"
-            pos_z = round(sorted_z[0][1], 2) if sorted_z and sorted_z[0][1] > 0 else 0.0
-            neg_z = round(sorted_z[-1][1], 2) if sorted_z and sorted_z[-1][1] < 0 else 0.0
+            if archetypes:
+                scored = [(score_fn(z_c), name, traits, camps) for (name, score_fn, traits, camps) in archetypes]
+                scored.sort(key=lambda x: x[0], reverse=True)
+                _, best_name, best_traits, best_camps = scored[0]
 
-            name = f"Segment {p_label} (High {top_pos_k}, Low {top_neg_k})"
-            traits = [
-                f"Distinguishing strength: {top_pos_k} (Z-Score: {pos_z:+0.2f})",
-                f"Lowest relative feature: {top_neg_k} (Z-Score: {neg_z:+0.2f})",
-                f"Comprises {cluster_counts.get(c, 0)} customer accounts within the active dataset",
-            ]
-            camps = [
-                {"title": f"Targeted Segment {p_label} Engagement Playbook", "description": f"Tailor messaging around {top_pos_k} to maximize response and conversion.", "channel": "Digital Channels"},
-                {"title": f"Value Optimization Campaign {p_label}", "description": f"Address friction points related to {top_neg_k} with guided onboarding.", "channel": "Email & In-App"},
-            ]
-            assignments[c] = (name, traits, camps)
+                # If high return rate and not already labeled Return-Prone, prepend flag
+                traits_copy = list(best_traits)
+                if ret_z > 0.6 and "Return" not in best_name:
+                    traits_copy = [f"Flag: Return-prone (Elevated returns Z: {ret_z:+0.2f})"] + traits_copy
+
+                assigned_raw[c] = (best_name, traits_copy, best_camps)
+            else:
+                p_label = chr(65 + c)
+                sorted_z = sorted(z_c.items(), key=lambda x: x[1], reverse=True)
+                top_pos_k = sorted_z[0][0] if sorted_z and sorted_z[0][1] > 0 else "Signal A"
+                top_neg_k = sorted_z[-1][0] if sorted_z and sorted_z[-1][1] < 0 else "Signal B"
+                name = f"Segment {p_label} (High {top_pos_k}, Low {top_neg_k})"
+                traits = [
+                    f"Distinguishing strength: {top_pos_k}",
+                    f"Lowest relative feature: {top_neg_k}",
+                    f"Comprises {cluster_counts.get(c, 0)} accounts within active dataset",
+                ]
+                camps = [
+                    {"title": f"Targeted Segment {p_label} Engagement", "description": f"Tailor messaging around {top_pos_k}.", "channel": "Digital Channels"},
+                    {"title": f"Value Optimization Campaign {p_label}", "description": f"Address friction points related to {top_neg_k}.", "channel": "Email & In-App"},
+                ]
+                assigned_raw[c] = (name, traits, camps)
+
+        # Disambiguate names: if two clusters map to the same archetype, append "(2)", "(3)", etc.
+        name_counts: Dict[str, int] = {}
+        for c in all_cluster_ids:
+            base_name, _, _ = assigned_raw[c]
+            name_counts[base_name] = name_counts.get(base_name, 0) + 1
+
+        name_seen: Dict[str, int] = {}
+        assignments: Dict[int, Tuple[str, List[str], List[Dict[str, str]]]] = {}
+        for c in all_cluster_ids:
+            base_name, traits, camps = assigned_raw[c]
+            if name_counts[base_name] > 1:
+                name_seen[base_name] = name_seen.get(base_name, 0) + 1
+                suffix = "" if name_seen[base_name] == 1 else f" ({name_seen[base_name]})"
+                final_name = f"{base_name}{suffix}"
+            else:
+                final_name = base_name
+            assignments[c] = (final_name, traits, camps)
 
         return assignments
 

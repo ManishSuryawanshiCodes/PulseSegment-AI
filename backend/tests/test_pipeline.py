@@ -63,6 +63,7 @@ def test_reproducibility_same_dataset():
     assert w1["silhouette_score"] == pytest.approx(w2["silhouette_score"], abs=1e-5)
     assert w1["davies_bouldin_index"] == pytest.approx(w2["davies_bouldin_index"], abs=1e-5)
     assert w1["calinski_harabasz_score"] == pytest.approx(w2["calinski_harabasz_score"], abs=1e-2)
+    assert np.array_equal(pipe1._winning_labels, pipe2._winning_labels)
 
     # Compare all 16 experiment silhouette scores
     for exp1, exp2 in zip(res1["experiments"], res2["experiments"]):
@@ -213,3 +214,101 @@ def test_phase4_feature_counts_are_dynamically_computed():
     # For 12 features, min(8, 12 - 1) = 8
     assert len(fe_5["ds3_mutual_info_features"]) != len(fe_12["ds3_mutual_info_features"])
     assert len(fe_12["ds3_mutual_info_features"]) == 8
+
+
+# -------------------------------------------------------------------------
+# Test (f): RFM fixture with lapsed cluster must be labelled "At-Risk"
+# -------------------------------------------------------------------------
+def test_rfm_lapsed_cluster_labelled_at_risk():
+    """
+    Verifies that high RECENCY is inverted in archetype scoring, so that
+    high RECENCY + low FREQUENCY maps to 'At-Risk / Lapsed'.
+    """
+    rng = np.random.RandomState(42)
+    n_per_cluster = 60
+
+    # Cluster 0: Champions (low recency, high frequency, high monetary)
+    c0 = {
+        "CUSTOMER_ID": [f"CHAMP_{i}" for i in range(n_per_cluster)],
+        "RECENCY": rng.uniform(2, 10, size=n_per_cluster),
+        "FREQUENCY": rng.uniform(20, 40, size=n_per_cluster),
+        "MONETARY": rng.uniform(1500, 3000, size=n_per_cluster),
+    }
+
+    # Cluster 1: Recent / Promising (low recency, moderate frequency, moderate spend)
+    c1 = {
+        "CUSTOMER_ID": [f"PROM_{i}" for i in range(n_per_cluster)],
+        "RECENCY": rng.uniform(3, 14, size=n_per_cluster),
+        "FREQUENCY": rng.uniform(2, 5, size=n_per_cluster),
+        "MONETARY": rng.uniform(100, 250, size=n_per_cluster),
+    }
+
+    # Cluster 2: Clearly Lapsed / At-Risk (high recency 250-400 days, low frequency 1 order)
+    c2 = {
+        "CUSTOMER_ID": [f"LAPSED_{i}" for i in range(n_per_cluster)],
+        "RECENCY": rng.uniform(250, 400, size=n_per_cluster),
+        "FREQUENCY": rng.uniform(1, 2, size=n_per_cluster),
+        "MONETARY": rng.uniform(20, 60, size=n_per_cluster),
+    }
+
+    df_rfm = pd.concat([pd.DataFrame(c0), pd.DataFrame(c1), pd.DataFrame(c2)], ignore_index=True)
+
+    cfg = DatasetConfig(
+        id_column="CUSTOMER_ID",
+        domain_template="ecommerce_rfm",
+        n_clusters=3,
+        iqr_multiplier=2.5,
+    )
+
+    pipe = PulseSegmentPipeline(df=df_rfm, config=cfg, dataset_id="test_rfm_lapsed")
+    personas_res = pipe.get_growth_personas()
+
+    personas = personas_res["personas"]
+    assert len(personas) == 3
+
+    persona_names = [p.name for p in personas]
+    assert any("At-Risk" in name for name in persona_names), f"Expected 'At-Risk' in {persona_names}"
+
+    # Verify trait wording in direction map: recency is lower_is_better
+    assert personas_res.get("direction_map", {}).get("RECENCY") == "lower_is_better"
+
+    # Find the lapsed persona and check characteristics or distinguishing trait
+    at_risk_persona = next(p for p in personas if "At-Risk" in p.name)
+    assert at_risk_persona.count == n_per_cluster
+    assert any("lapsed" in c.lower() or "recency" in c.lower() for c in at_risk_persona.characteristics)
+
+
+# -------------------------------------------------------------------------
+# Test (g): Persona count always equals k for k=3, 4, 5 with unique names
+# -------------------------------------------------------------------------
+@pytest.mark.parametrize("k", [3, 4, 5])
+def test_persona_count_equals_k_for_3_4_5(k):
+    """Guarantees number of personas strictly equals n_clusters with unique names."""
+    df = create_mock_dataset(n_samples=180, n_features=6, random_state=42)
+    cfg = DatasetConfig(
+        id_column="CUSTOMER_ID",
+        domain_template="ecommerce_rfm",
+        n_clusters=k,
+    )
+    pipe = PulseSegmentPipeline(df=df, config=cfg, dataset_id=f"test_k_{k}")
+    res = pipe.get_growth_personas()
+
+    personas = res["personas"]
+    assert len(personas) == k, f"Expected {k} personas for k={k}, got {len(personas)}"
+
+    names = [p.name for p in personas]
+    assert len(set(names)) == k, f"Names must all be unique, got {names}"
+
+    # Verify box plots are generated for top features
+    assert "box_plots" in res
+    assert len(res["box_plots"]) > 0
+
+
+# -------------------------------------------------------------------------
+# Test (h): Silhouette constant sample size (5000 applies when N > 8000)
+# -------------------------------------------------------------------------
+def test_silhouette_sample_constant_definition():
+    from pipeline import SILHOUETTE_SAMPLE_THRESHOLD, SILHOUETTE_SAMPLE_SIZE
+    assert SILHOUETTE_SAMPLE_THRESHOLD == 8000
+    assert SILHOUETTE_SAMPLE_SIZE == 5000
+

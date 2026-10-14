@@ -121,6 +121,7 @@ class ExperimentResult(BaseModel):
     cluster_count: int
     noise_percentage: float
     sampled_silhouette: bool = False
+    silhouette_sample_size: Optional[int] = None
     status: str = "success"
     reason: Optional[str] = None
     scatter_data: List[Dict[str, Any]] = Field(default_factory=list)
@@ -150,6 +151,7 @@ class DistinguishingFeature(BaseModel):
     z_score: float
     cluster_mean: float
     global_mean: float
+    interpretation: Optional[str] = None
 
 
 class NBACampaign(BaseModel):
@@ -181,6 +183,19 @@ class PersonaProfile(BaseModel):
     nba_campaigns: List[NBACampaign] = Field(default_factory=list)
 
 
+class ClusterBoxPlotStat(BaseModel):
+    min: float
+    q1: float
+    median: float
+    q3: float
+    max: float
+
+
+class FeatureBoxPlot(BaseModel):
+    feature: str
+    clusters: Dict[str, ClusterBoxPlotStat]  # cluster name -> stats
+
+
 class GrowthPersonas(BaseModel):
     dataset_id: Optional[str] = None
     personas: List[PersonaProfile]
@@ -188,6 +203,8 @@ class GrowthPersonas(BaseModel):
     winning_silhouette: Optional[float] = None
     winning_dbi: Optional[float] = None
     domain_template: Optional[str] = None
+    box_plots: Optional[List[FeatureBoxPlot]] = Field(default_factory=list)
+    direction_map: Optional[Dict[str, str]] = Field(default_factory=dict)
 
 
 # --- Operational & Inference Models ---

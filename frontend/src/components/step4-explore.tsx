@@ -111,6 +111,23 @@ export function Step4Explore({
     }
   }
 
+  // Box Plot Feature Selection
+  const boxPlotList = personas?.box_plots || []
+  const availableBoxFeatures = boxPlotList.length > 0
+    ? boxPlotList.map((b) => b.feature)
+    : topFeatures
+  const [selectedBoxFeature, setSelectedBoxFeature] = useState<string>(availableBoxFeatures[0] || '')
+  const [exploreViewMode, setExploreViewMode] = useState<'box' | 'bar'>('box')
+
+  // Keep selectedBoxFeature in sync
+  React.useEffect(() => {
+    if (availableBoxFeatures.length > 0 && (!selectedBoxFeature || !availableBoxFeatures.includes(selectedBoxFeature))) {
+      setSelectedBoxFeature(availableBoxFeatures[0])
+    }
+  }, [availableBoxFeatures, selectedBoxFeature])
+
+  const activeBoxStat = boxPlotList.find((b) => b.feature === selectedBoxFeature)
+
   return (
     <div className="space-y-8 animate-fadeIn">
       {/* 1. 2D PCA Scatter Projection */}
@@ -302,46 +319,279 @@ export function Step4Explore({
         </div>
       </div>
 
-      {/* 3. Feature Distribution per Cluster */}
-      {featureSpreadData.length > 0 && (
-        <div className="bg-[var(--card)] border border-[var(--border)] rounded-xl p-6 shadow-sm space-y-4">
-          <div>
-            <h3 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
-              <BarChart2 className="w-4 h-4 text-accent-indigo" />
-              Feature Spread Across Customer Segments
-            </h3>
-            <p className="text-xs text-[var(--text-muted)] mt-0.5">
-              Comparing average original metrics across the discovered customer groups.
-            </p>
+      {/* 3. Per-Cluster Feature Box Plots & Spread */}
+      {availableBoxFeatures.length > 0 && (
+        <div className="bg-[var(--card)] border border-[var(--border)] rounded-xl p-6 shadow-sm space-y-5">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-[var(--border)]">
+            <div>
+              <h3 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
+                <BarChart2 className="w-4 h-4 text-accent-indigo" />
+                Per-Cluster Feature Box Plots & Distributions
+              </h3>
+              <p className="text-xs text-[var(--text-muted)] mt-0.5">
+                Inspect quartile spreads (Q1, median, Q3) and min/max whiskers across each customer segment in original feature units.
+              </p>
+            </div>
+
+            {/* View Mode Toggle: Box Plot vs Bar Chart */}
+            <div className="flex items-center gap-1 bg-[var(--card-elevated)] p-1 rounded-lg border border-[var(--border)] text-xs font-medium self-start sm:self-auto">
+              <button
+                type="button"
+                onClick={() => setExploreViewMode('box')}
+                className={`px-3 py-1 rounded transition-colors ${
+                  exploreViewMode === 'box'
+                    ? 'bg-accent-indigo text-white font-semibold'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                Box Plots
+              </button>
+              <button
+                type="button"
+                onClick={() => setExploreViewMode('bar')}
+                className={`px-3 py-1 rounded transition-colors ${
+                  exploreViewMode === 'bar'
+                    ? 'bg-accent-indigo text-white font-semibold'
+                    : 'text-[var(--text-muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                Averages Bar Chart
+              </button>
+            </div>
           </div>
 
-          <div className="h-64 w-full pt-1">
-            <ResponsiveContainer width="100%" height="100%">
-              <BarChart data={featureSpreadData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#27272A" opacity={0.5} />
-                <XAxis dataKey="feature" stroke="#71717A" tick={{ fontSize: 11 }} />
-                <YAxis stroke="#71717A" tick={{ fontSize: 11 }} />
-                <RechartsTooltip contentStyle={{ backgroundColor: '#121215', borderColor: '#27272A', fontSize: '12px' }} />
-                <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
-                {personas?.personas.map((p, idx) => (
-                  <Bar
-                    key={p.name}
-                    dataKey={p.name}
-                    fill={CLUSTER_PALETTE[idx % CLUSTER_PALETTE.length]}
-                    radius={[4, 4, 0, 0]}
-                  />
-                ))}
-              </BarChart>
-            </ResponsiveContainer>
+          {/* Feature Selector Pills */}
+          <div className="flex items-center gap-2 overflow-x-auto pb-1 text-xs">
+            <span className="text-[var(--text-muted)] text-[11px] font-medium shrink-0">Select Feature:</span>
+            {availableBoxFeatures.map((feat) => (
+              <button
+                key={feat}
+                type="button"
+                onClick={() => setSelectedBoxFeature(feat)}
+                className={`px-2.5 py-1 rounded-md text-xs font-mono transition-colors shrink-0 ${
+                  selectedBoxFeature === feat
+                    ? 'bg-accent-indigo text-white font-bold'
+                    : 'bg-[var(--card-elevated)] border border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)]'
+                }`}
+              >
+                {feat}
+              </button>
+            ))}
           </div>
+
+          {exploreViewMode === 'box' ? (
+            /* Box Plot SVG Visualization */
+            <div className="space-y-4">
+              <div className="bg-[var(--card-elevated)] border border-[var(--border)] rounded-xl p-4 overflow-x-auto">
+                {activeBoxStat ? (
+                  (() => {
+                    const clusterEntries = Object.entries(activeBoxStat.clusters)
+                    const allMins = clusterEntries.map(([_, s]) => s.min)
+                    const allMaxs = clusterEntries.map(([_, s]) => s.max)
+                    const minAll = Math.min(...allMins)
+                    const maxAll = Math.max(...allMaxs)
+                    const span = maxAll - minAll || 1
+                    const svgWidth = Math.max(600, clusterEntries.length * 140)
+                    const svgHeight = 220
+                    const padTop = 20
+                    const padBottom = 30
+                    const padLeft = 60
+                    const plotH = svgHeight - padTop - padBottom
+                    const slotW = (svgWidth - padLeft) / Math.max(1, clusterEntries.length)
+
+                    const getY = (val: number) => {
+                      const ratio = (val - minAll) / span
+                      return padTop + plotH - ratio * plotH
+                    }
+
+                    return (
+                      <div className="min-w-[600px]">
+                        <svg
+                          width="100%"
+                          height={svgHeight}
+                          viewBox={`0 0 ${svgWidth} ${svgHeight}`}
+                          className="overflow-visible font-mono text-[11px]"
+                        >
+                          {/* Y-Axis Horizontal Gridlines */}
+                          {[0, 0.25, 0.5, 0.75, 1.0].map((t) => {
+                            const val = minAll + t * span
+                            const y = getY(val)
+                            return (
+                              <g key={t}>
+                                <line
+                                  x1={padLeft - 6}
+                                  y1={y}
+                                  x2={svgWidth}
+                                  y2={y}
+                                  stroke="#27272A"
+                                  strokeDasharray="3 3"
+                                  strokeOpacity={0.6}
+                                />
+                                <text
+                                  x={padLeft - 10}
+                                  y={y + 3}
+                                  textAnchor="end"
+                                  fill="#71717A"
+                                  fontSize="10"
+                                >
+                                  {formatNumber(Math.round(val))}
+                                </text>
+                              </g>
+                            )
+                          })}
+
+                          {/* Render Box & Whiskers per Cluster */}
+                          {clusterEntries.map(([cName, s], idx) => {
+                            const cx = padLeft + (idx + 0.5) * slotW
+                            const col = CLUSTER_PALETTE[idx % CLUSTER_PALETTE.length]
+                            const yMin = getY(s.min)
+                            const yQ1 = getY(s.q1)
+                            const yMed = getY(s.median)
+                            const yQ3 = getY(s.q3)
+                            const yMax = getY(s.max)
+                            const boxW = Math.min(54, slotW * 0.5)
+
+                            return (
+                              <g key={cName}>
+                                {/* Whisker vertical line */}
+                                <line
+                                  x1={cx}
+                                  y1={yMin}
+                                  x2={cx}
+                                  y2={yMax}
+                                  stroke={col}
+                                  strokeWidth="1.5"
+                                  strokeDasharray="2 2"
+                                />
+
+                                {/* Upper whisker cap */}
+                                <line
+                                  x1={cx - boxW * 0.35}
+                                  y1={yMax}
+                                  x2={cx + boxW * 0.35}
+                                  y2={yMax}
+                                  stroke={col}
+                                  strokeWidth="2"
+                                />
+
+                                {/* Lower whisker cap */}
+                                <line
+                                  x1={cx - boxW * 0.35}
+                                  y1={yMin}
+                                  x2={cx + boxW * 0.35}
+                                  y2={yMin}
+                                  stroke={col}
+                                  strokeWidth="2"
+                                />
+
+                                {/* IQR Box (Q1 to Q3) */}
+                                <rect
+                                  x={cx - boxW / 2}
+                                  y={Math.min(yQ1, yQ3)}
+                                  width={boxW}
+                                  height={Math.max(3, Math.abs(yQ1 - yQ3))}
+                                  fill={col}
+                                  fillOpacity="0.25"
+                                  stroke={col}
+                                  strokeWidth="1.5"
+                                  rx="3"
+                                />
+
+                                {/* Median horizontal line */}
+                                <line
+                                  x1={cx - boxW / 2}
+                                  y1={yMed}
+                                  x2={cx + boxW / 2}
+                                  y2={yMed}
+                                  stroke="#FFFFFF"
+                                  strokeWidth="2.5"
+                                />
+
+                                {/* X-Axis Cluster Label */}
+                                <text
+                                  x={cx}
+                                  y={svgHeight - 10}
+                                  textAnchor="middle"
+                                  fill="#A1A1AA"
+                                  fontSize="10"
+                                  fontWeight="600"
+                                >
+                                  {cName.length > 18 ? `${cName.slice(0, 16)}...` : cName}
+                                </text>
+                              </g>
+                            )
+                          })}
+                        </svg>
+
+                        {/* Statistical Summary Pills per Cluster */}
+                        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2.5 pt-4 border-t border-[var(--border)]">
+                          {clusterEntries.map(([cName, s], idx) => {
+                            const col = CLUSTER_PALETTE[idx % CLUSTER_PALETTE.length]
+                            return (
+                              <div
+                                key={cName}
+                                className="p-2.5 rounded-lg bg-[var(--card)] border border-[var(--border)] space-y-1 text-xs font-mono"
+                              >
+                                <div className="flex items-center gap-1.5 font-sans font-bold text-[var(--text)] text-[11px] truncate">
+                                  <span
+                                    className="w-2 h-2 rounded-full shrink-0"
+                                    style={{ backgroundColor: col }}
+                                  />
+                                  <span className="truncate">{cName}</span>
+                                </div>
+                                <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[10px] text-[var(--text-muted)] pt-1">
+                                  <div>Min: <strong className="text-[var(--text)]">{formatNumber(s.min)}</strong></div>
+                                  <div>Max: <strong className="text-[var(--text)]">{formatNumber(s.max)}</strong></div>
+                                  <div>Q1 (25%): <strong className="text-[var(--text)]">{formatNumber(s.q1)}</strong></div>
+                                  <div>Q3 (75%): <strong className="text-[var(--text)]">{formatNumber(s.q3)}</strong></div>
+                                  <div className="col-span-2 pt-0.5 text-accent-indigo font-bold">
+                                    Median: {formatNumber(s.median)}
+                                  </div>
+                                </div>
+                              </div>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    )
+                  })()
+                ) : (
+                  <div className="p-4 text-center text-xs text-[var(--text-muted)]">
+                    No box plot distribution data available for {selectedBoxFeature}.
+                  </div>
+                )}
+              </div>
+            </div>
+          ) : (
+            /* Grouped Bar Chart View */
+            <div className="h-64 w-full pt-1">
+              <ResponsiveContainer width="100%" height="100%">
+                <BarChart data={featureSpreadData} margin={{ top: 10, right: 30, left: 10, bottom: 5 }}>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#27272A" opacity={0.5} />
+                  <XAxis dataKey="feature" stroke="#71717A" tick={{ fontSize: 11 }} />
+                  <YAxis stroke="#71717A" tick={{ fontSize: 11 }} />
+                  <RechartsTooltip contentStyle={{ backgroundColor: '#121215', borderColor: '#27272A', fontSize: '12px' }} />
+                  <Legend wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }} />
+                  {personas?.personas.map((p, idx) => (
+                    <Bar
+                      key={p.name}
+                      dataKey={p.name}
+                      fill={CLUSTER_PALETTE[idx % CLUSTER_PALETTE.length]}
+                      radius={[4, 4, 0, 0]}
+                    />
+                  ))}
+                </BarChart>
+              </ResponsiveContainer>
+            </div>
+          )}
 
           <div className="p-3 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] text-xs text-[var(--text-muted)] flex items-start gap-2">
             <Info className="w-4 h-4 text-accent-indigo shrink-0 mt-0.5" />
             <div>
               <span className="font-semibold text-[var(--text)] block">What am I looking at?</span>
               <span>
-                These bars show average real-world values (in original units such as dollars and counts) across each persona.
-                Notice how affluent spenders exhibit high monetary volume, while transactors lead in transaction frequencies.
+                The box plot displays the middle 50% interquartile range (IQR) from Q1 to Q3 for{' '}
+                <strong className="text-[var(--text)] font-mono">{selectedBoxFeature}</strong>. The solid white bar inside each box is the median customer value, while the dotted whiskers extend to the minimum and maximum boundaries for each customer persona.
               </span>
             </div>
           </div>

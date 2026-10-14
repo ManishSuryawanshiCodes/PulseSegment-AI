@@ -38,6 +38,7 @@ interface Step3BenchmarkProps {
   matrix: ExperimentsMatrix | null
   jobStatus: JobStatus | null
   isRunning: boolean
+  onRunBenchmark?: () => void
   onCancelJob: () => void
   onAdvanceToExplore: () => void
 }
@@ -46,6 +47,7 @@ export function Step3Benchmark({
   matrix,
   jobStatus,
   isRunning,
+  onRunBenchmark,
   onCancelJob,
   onAdvanceToExplore,
 }: Step3BenchmarkProps) {
@@ -61,7 +63,38 @@ export function Step3Benchmark({
   const [sortField, setSortField] = useState<keyof ExperimentResult>('composite_score')
   const [sortAsc, setSortAsc] = useState<boolean>(false)
 
-  // 1. Running Progress Panel State
+  // 1. Pending Run State (No results yet)
+  if (!isRunning && (!matrix || !matrix.experiments || matrix.experiments.length === 0)) {
+    return (
+      <div className="min-h-[460px] flex items-center justify-center p-6 animate-fadeIn">
+        <div className="w-full max-w-lg bg-[var(--card)] border border-[var(--border)] rounded-2xl p-8 shadow-xl text-center space-y-5">
+          <div className="w-14 h-14 rounded-2xl bg-accent-indigo/10 border border-accent-indigo/25 flex items-center justify-center text-accent-indigo mx-auto shadow-inner">
+            <Sparkles className="w-7 h-7" />
+          </div>
+
+          <div className="space-y-2">
+            <h3 className="text-lg font-bold text-[var(--text)]">
+              16-Experiment Benchmark Pending
+            </h3>
+            <p className="text-xs text-[var(--text-muted)] leading-relaxed max-w-md mx-auto">
+              Execute 4 Feature Engineering spaces &times; 4 Clustering algorithms (KMeans, Agglomerative, DBSCAN, and GMM) to discover the mathematical optimum for your customer data.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={onRunBenchmark}
+            className="px-6 py-2.5 rounded-lg bg-accent-indigo hover:bg-accent-indigo/90 text-white font-medium text-xs shadow-sm transition-all inline-flex items-center gap-2 cursor-pointer"
+          >
+            Run 16-experiment benchmark
+            <ArrowRight className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  // 2. Running Progress Panel State
   if (isRunning) {
     const completed = jobStatus?.completed || 0
     const total = jobStatus?.total || 16
@@ -147,6 +180,9 @@ export function Step3Benchmark({
         else if (activeMetric === 'speed') val = e.execution_time_ms
 
         entry[e.algorithm] = val !== null ? val : 0
+        if (e.algorithm === 'GaussianMixture') {
+          entry['GMM'] = val !== null ? val : 0
+        }
       })
     return entry
   })
@@ -417,10 +453,10 @@ export function Step3Benchmark({
                 wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }}
                 iconType="circle"
               />
-              <Bar dataKey="KMeans" fill="#6366F1" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="Agglomerative" fill="#10B981" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="DBSCAN" fill="#F59E0B" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="GaussianMixture" fill="#8B5CF6" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="KMeans" name="K-Means" fill="#6366F1" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Agglomerative" name="Agglomerative" fill="#10B981" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="DBSCAN" name="DBSCAN" fill="#F59E0B" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="GaussianMixture" name="GMM" fill="#8B5CF6" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>

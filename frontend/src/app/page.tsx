@@ -42,11 +42,23 @@ export default function Home() {
 
 function PulseSegmentApp() {
   // Stepper state with URL search param sync
-  const [currentStep, setCurrentStep] = useState<StepId>('data')
+  const [currentStep, setCurrentStep] = useState<StepId>(() => {
+    if (typeof window !== 'undefined') {
+      const sp = new URLSearchParams(window.location.search).get('step') as StepId
+      if (sp && ['data', 'prepare', 'benchmark', 'explore', 'act'].includes(sp)) return sp
+    }
+    return 'data'
+  })
 
   // Datasets state
   const [datasets, setDatasets] = useState<DatasetInfo[]>([])
-  const [activeDatasetId, setActiveDatasetId] = useState<string>('sample_credit_card')
+  const [activeDatasetId, setActiveDatasetId] = useState<string>(() => {
+    if (typeof window !== 'undefined') {
+      const ds = new URLSearchParams(window.location.search).get('dataset')
+      if (ds) return ds
+    }
+    return 'sample_credit_card'
+  })
   const [datasetDropdownOpen, setDatasetDropdownOpen] = useState(false)
   const [isUploading, setIsUploading] = useState(false)
 
@@ -64,6 +76,7 @@ function PulseSegmentApp() {
   const [isBenchmarkRunning, setIsBenchmarkRunning] = useState<boolean>(false)
   const [pageLoading, setPageLoading] = useState<boolean>(true)
   const [errorNotice, setErrorNotice] = useState<string | null>(null)
+  const [toast, setToast] = useState<{ message: string; type?: 'info' | 'warning' | 'error' } | null>(null)
 
   // Help drawer state
   const [helpOpen, setHelpOpen] = useState(false)
@@ -71,22 +84,72 @@ function PulseSegmentApp() {
   const hiddenUploadRef = useRef<HTMLInputElement>(null)
   const pollIntervalRef = useRef<NodeJS.Timeout | null>(null)
 
-  // Synchronize step and dataset with URL search param
+  // Auto-dismiss toast
+  useEffect(() => {
+    if (toast) {
+      const timer = setTimeout(() => setToast(null), 4000)
+      return () => clearTimeout(timer)
+    }
+  }, [toast])
+
+  // Synchronize step and dataset with URL search param, enforcing locked step protection
   useEffect(() => {
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search)
       const stepParam = params.get('step') as StepId
+      const dsParam = params.get('dataset')
+      if (dsParam && dsParam !== activeDatasetId) {
+        setMatrix(null)
+        setPersonas(null)
+        setActiveDatasetId(dsParam)
+        return
+      }
       if (stepParam && ['data', 'prepare', 'benchmark', 'explore', 'act'].includes(stepParam)) {
+        if (!pageLoading) {
+          const hasBenchmarkResults = Boolean(
+            matrix &&
+            matrix.dataset_id === activeDatasetId &&
+            matrix.experiments &&
+            matrix.experiments.length > 0
+          )
+          if ((stepParam === 'explore' || stepParam === 'act') && !hasBenchmarkResults) {
+            setCurrentStep('benchmark')
+            setToast({
+              message: 'Locked step: Run the 16-experiment benchmark first before accessing personas and action playbooks.',
+              type: 'warning',
+            })
+            const url = new URL(window.location.href)
+            url.searchParams.set('step', 'benchmark')
+            window.history.replaceState({}, '', url.toString())
+            return
+          }
+        }
         setCurrentStep(stepParam)
       }
-      const dsParam = params.get('dataset')
-      if (dsParam) {
-        setActiveDatasetId(dsParam)
-      }
     }
-  }, [])
+  }, [matrix, pageLoading, activeDatasetId])
 
   const setStep = (step: StepId) => {
+    const hasBenchmarkResults = Boolean(
+      matrix &&
+      matrix.dataset_id === activeDatasetId &&
+      matrix.experiments &&
+      matrix.experiments.length > 0
+    )
+    if ((step === 'explore' || step === 'act') && !hasBenchmarkResults) {
+      setToast({
+        message: 'Locked step: Run the 16-experiment benchmark first before accessing personas and action playbooks.',
+        type: 'warning',
+      })
+      setCurrentStep('benchmark')
+      if (typeof window !== 'undefined') {
+        const url = new URL(window.location.href)
+        url.searchParams.set('step', 'benchmark')
+        window.history.pushState({}, '', url.toString())
+      }
+      return
+    }
+
     setCurrentStep(step)
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href)
@@ -97,6 +160,8 @@ function PulseSegmentApp() {
 
   const selectDataset = (dsId: string) => {
     setActiveDatasetId(dsId)
+    setMatrix(null)
+    setPersonas(null)
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href)
       url.searchParams.set('dataset', dsId)
@@ -112,6 +177,8 @@ function PulseSegmentApp() {
   // Whenever activeDatasetId changes, load its profile and config
   useEffect(() => {
     if (activeDatasetId) {
+      setMatrix(null)
+      setPersonas(null)
       loadDatasetData(activeDatasetId)
     }
   }, [activeDatasetId])
@@ -135,22 +202,15 @@ function PulseSegmentApp() {
     setPageLoading(true)
     setErrorNotice(null)
     try {
-      const [profData, cfgData] = await Promise.all([
+      const [profData, cfgData, expData] = await Promise.all([
         api.getProfile(dsId).catch(() => null),
         api.getConfig(dsId).catch(() => null),
+        api.experimentsMatrix(dsId).catch(() => null),
       ])
       if (profData) setProfile(profData)
       if (cfgData) setConfig(cfgData)
 
-      // Try loading existing summary & feature engineering
-      const sumData = await api.datasetSummary(dsId).catch(() => null)
-      if (sumData) setSummary(sumData)
-
-      const featData = await api.featureEngineering(dsId).catch(() => null)
-      if (featData) setFeatures(featData)
-
-      // Check if benchmark was already run
-      const expData = await api.experimentsMatrix(dsId).catch(() => null)
+      // Immediately enforce locked step check if benchmark not run
       if (expData && expData.experiments && expData.experiments.length > 0) {
         setMatrix(expData)
         const persData = await api.growthPersonas(dsId).catch(() => null)
@@ -158,7 +218,29 @@ function PulseSegmentApp() {
       } else {
         setMatrix(null)
         setPersonas(null)
+        const urlStep = typeof window !== 'undefined' ? (new URLSearchParams(window.location.search).get('step') as StepId) : null
+        const targetStep = urlStep || currentStep
+        if (targetStep === 'explore' || targetStep === 'act') {
+          setCurrentStep('benchmark')
+          setToast({
+            message: 'Locked step: Run the 16-experiment benchmark first before accessing personas and action playbooks.',
+            type: 'warning',
+          })
+          if (typeof window !== 'undefined') {
+            const url = new URL(window.location.href)
+            url.searchParams.set('step', 'benchmark')
+            window.history.replaceState({}, '', url.toString())
+          }
+        }
       }
+
+      // Load summary & feature engineering
+      const [sumData, featData] = await Promise.all([
+        api.datasetSummary(dsId).catch(() => null),
+        api.featureEngineering(dsId).catch(() => null),
+      ])
+      if (sumData) setSummary(sumData)
+      if (featData) setFeatures(featData)
     } catch (err: any) {
       setErrorNotice(err.message || 'Error loading dataset')
     } finally {
@@ -426,6 +508,7 @@ function PulseSegmentApp() {
             matrix={matrix}
             jobStatus={jobStatus}
             isRunning={isBenchmarkRunning}
+            onRunBenchmark={handleStartBenchmark}
             onCancelJob={handleCancelBenchmark}
             onAdvanceToExplore={() => setStep('explore')}
           />
@@ -453,6 +536,28 @@ function PulseSegmentApp() {
 
       {/* Help Slide-Over Drawer */}
       <HelpDrawer open={helpOpen} onClose={() => setHelpOpen(false)} />
+
+      {/* Toast Notification for Locked Steps & Warnings */}
+      {toast && (
+        <div
+          role="alert"
+          className="fixed bottom-6 right-6 z-50 max-w-sm p-4 rounded-xl bg-zinc-950/95 text-zinc-100 border border-amber-500/50 shadow-2xl backdrop-blur-md flex items-start gap-3 animate-fadeIn"
+        >
+          <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+          <div className="flex-1 text-xs">
+            <div className="font-semibold text-amber-300">Step Locked</div>
+            <div className="text-zinc-300 mt-0.5 leading-relaxed">{toast.message}</div>
+          </div>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            className="text-zinc-400 hover:text-white text-base leading-none shrink-0"
+            aria-label="Dismiss toast"
+          >
+            &times;
+          </button>
+        </div>
+      )}
     </div>
   )
 }

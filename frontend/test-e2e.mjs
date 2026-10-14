@@ -2,7 +2,7 @@ import { chromium } from 'playwright'
 import fs from 'fs'
 import path from 'path'
 
-const SCREENSHOT_DIR = 'C:/Users/MANISH/.gemini/antigravity/brain/f91db293-db51-4723-8d2c-b390c8660a9c/screenshots'
+const SCREENSHOT_DIR = 'C:/Users/MANISH/.gemini/antigravity/brain/7d7da3c2-60ac-430a-ab50-759c0aeb1917/screenshots'
 if (!fs.existsSync(SCREENSHOT_DIR)) {
   fs.mkdirSync(SCREENSHOT_DIR, { recursive: true })
 }

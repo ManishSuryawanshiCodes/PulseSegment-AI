@@ -140,7 +140,7 @@ export function HelpDrawer({ open, onClose }: HelpDrawerProps) {
               <div className="p-3 rounded-md bg-[var(--card-elevated)] border border-[var(--border)] space-y-1.5">
                 <span className="font-semibold text-accent-indigo block">Sampling & Execution Speed Note</span>
                 <p className="text-[var(--text-muted)] leading-relaxed">
-                  For datasets with <strong>N &gt; 8,000</strong>, Silhouette is computed on a stratified sample of 5,000 points to prevent O(N&sup2;) browser freezes. Agglomerative clustering samples at N &gt; 10,000. All execution runtimes (ms) are machine-dependent and reflect actual wall-clock inference speed.
+                  For large datasets where <strong>N &gt; 8,000</strong> (<code className="text-accent-indigo font-mono">SILHOUETTE_SAMPLE_THRESHOLD</code>), Silhouette is evaluated on a random subsample of exactly <strong>5,000 points</strong> (<code className="text-accent-indigo font-mono">SILHOUETTE_SAMPLE_SIZE = 5000</code>, returning <code className="text-accent-emerald font-mono">sampled=true, sample_size=5000</code> in the API response) to prevent O(N&sup2;) pairwise latency. Agglomerative clustering similarly samples if N &gt; 3,000 using NearestCentroid projection. All execution runtimes (ms) are machine-dependent and reflect dynamic wall-clock inference speed.
                 </p>
               </div>
             </div>

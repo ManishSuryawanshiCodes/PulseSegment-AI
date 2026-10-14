@@ -109,6 +109,8 @@ def _run_benchmark_worker(job_id: str, dataset_id: str):
                 status="completed",
                 result=res,
             )
+            if dataset_id in dataset_manager._datasets:
+                dataset_manager._datasets[dataset_id]["has_results"] = True
     except Exception as e:
         job_manager.update_job(
             job_id,
@@ -169,24 +171,32 @@ def feature_engineering_scoped(dataset_id: str):
 @app.get("/api/experiments-matrix", response_model=ExperimentsMatrix)
 def experiments_matrix(dataset_id: str = Query("sample_credit_card")):
     pipe = dataset_manager.get_pipeline(dataset_id)
-    return pipe.run_experiments()
+    if pipe._experiments_cache is None:
+        raise HTTPException(status_code=404, detail="Benchmark has not been run for this dataset yet.")
+    return pipe._experiments_cache
 
 
 @app.get("/api/datasets/{dataset_id}/experiments", response_model=ExperimentsMatrix)
 def experiments_matrix_scoped(dataset_id: str):
     pipe = dataset_manager.get_pipeline(dataset_id)
-    return pipe.run_experiments()
+    if pipe._experiments_cache is None:
+        raise HTTPException(status_code=404, detail="Benchmark has not been run for this dataset yet.")
+    return pipe._experiments_cache
 
 
 @app.get("/api/growth-personas", response_model=GrowthPersonas)
 def growth_personas(dataset_id: str = Query("sample_credit_card")):
     pipe = dataset_manager.get_pipeline(dataset_id)
+    if pipe._experiments_cache is None:
+        raise HTTPException(status_code=404, detail="Benchmark has not been run for this dataset yet.")
     return pipe.get_growth_personas()
 
 
 @app.get("/api/datasets/{dataset_id}/personas", response_model=GrowthPersonas)
 def growth_personas_scoped(dataset_id: str):
     pipe = dataset_manager.get_pipeline(dataset_id)
+    if pipe._experiments_cache is None:
+        raise HTTPException(status_code=404, detail="Benchmark has not been run for this dataset yet.")
     return pipe.get_growth_personas()
 
 
