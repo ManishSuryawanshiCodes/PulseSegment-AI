@@ -21,6 +21,7 @@ from sklearn.mixture import GaussianMixture
 from sklearn.neighbors import NearestNeighbors, NearestCentroid
 from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 import joblib
+from pulsecluster import PulseCluster
 
 from models import (
     DatasetConfig,
@@ -764,6 +765,26 @@ class PulseSegmentPipeline:
             status_str = "success"
             reason_str = None
 
+        elif alg_name == "PulseCluster":
+            pc = PulseCluster(
+                n_clusters=k_clusters,
+                n_bootstraps=5,
+                time_budget_sec=min(15.0, getattr(self.config, "pulsecluster_time_budget", 20.0)),
+                engineer_ratios=getattr(self.config, "pulsecluster_ratios", True),
+                random_state=42,
+            )
+            # Pass unscaled/raw dataframe if available or active features
+            pc.fit(df_cur)
+            labels = pc.labels_
+            model = pc
+            noise_percentage = 0.0
+            cluster_count = pc.selected_k_
+            status_str = "success"
+            reason_str = None
+            reliability_score = pc.reliability_
+            stability_score = pc.stability_score_
+            timing_breakdown = pc.timing_breakdown_
+
         t1 = time.perf_counter()
         exec_time_ms = round((t1 - t0) * 1000.0, 2)
 
@@ -867,6 +888,9 @@ class PulseSegmentPipeline:
             "reason": reason_str,
             "scatter_data": scatter_data,
             "cluster_sizes": cluster_sizes,
+            "reliability": locals().get("reliability_score", None),
+            "stability": locals().get("stability_score", None),
+            "timing_breakdown": locals().get("timing_breakdown", None),
             "_model": model,
             "_labels": labels,
         }
@@ -904,11 +928,16 @@ class PulseSegmentPipeline:
         else:
             self._pca_2d = None
 
-        # Build task list of (dataset, algorithm)
+        # Build task list: 4 Spaces x 4 Core Algorithms (16 experiments)
         tasks = []
         for dname in dataset_keys:
             for alg_name in algorithm_names:
                 tasks.append((dname, alg_name))
+
+        # Add proposed 5th option: "PulseCluster" on DS1_Original (or full feature space)
+        if getattr(self.config, "enable_pulsecluster", True):
+            tasks.append(("DS1_Original", "PulseCluster"))
+
 
         total_steps = len(tasks)
         results: List[Dict[str, Any]] = []
@@ -1011,8 +1040,29 @@ class PulseSegmentPipeline:
 
         if self.db:
             self.db.save_pipeline_cache(self.dataset_id, self.config_hash, experiments=self._experiments_cache)
+            # Record persistent saved run
+            run_uuid = f"run_{self.dataset_id}_{self.config_hash}_{int(time.time())}"
+            self.db.save_run(
+                run_id=run_uuid,
+                dataset_id=self.dataset_id,
+                config_hash=self.config_hash,
+                winning_algorithm=self._winning_alg_name or "Unknown",
+                winning_space=self._winning_dataset_name or "Unknown",
+                n_clusters=self.config.n_clusters,
+                config_dict=self.config.model_dump(),
+                metrics_dict={
+                    "composite_score": winning_clean.get("composite_score"),
+                    "silhouette_score": winning_clean.get("silhouette_score"),
+                    "common_space_silhouette": winning_clean.get("common_space_silhouette"),
+                    "davies_bouldin_index": winning_clean.get("davies_bouldin_index"),
+                    "calinski_harabasz_score": winning_clean.get("calinski_harabasz_score"),
+                    "execution_time_ms": winning_clean.get("execution_time_ms"),
+                    "reliability": winning_clean.get("reliability"),
+                },
+            )
 
         return self._experiments_cache
+
 
     def get_growth_personas(self) -> Dict[str, Any]:
         """
@@ -1148,6 +1198,51 @@ class PulseSegmentPipeline:
                     )
                 )
 
+            # Calculate Value and Risk scores dynamically from real data
+            # Value score = share of total spend / revenue across the customer population
+            val_col = None
+            for cand_col in ["PURCHASES", "PAYMENTS", "monetary", "revenue", "mrr", "amount"]:
+                for f_col in self._feature_names:
+                    if cand_col in f_col.upper():
+                        val_col = f_col
+                        break
+                if val_col:
+                    break
+
+            if val_col and val_col in df_unscaled.columns:
+                total_val_all = float(df_unscaled[val_col].sum())
+                c_mask = (labels == c)
+                c_val_total = float(df_unscaled.loc[c_mask, val_col].sum()) if np.any(c_mask) else 0.0
+                value_score = round((c_val_total / (total_val_all + 1e-6)) * 100.0, 1)
+                value_metric_name = f"Share of total {val_col}"
+            else:
+                value_score = pct
+                value_metric_name = "Share of customer accounts"
+
+            # Risk score = weighted score of low activity, high utilization, low payment ratio
+            # Transparent weighted formula:
+            # risk_score = 40 * (normalized high balance / credit limit) + 30 * (1 - payment ratio / min payments) + 30 * (1 - normalized activity)
+            act_z = 0.0
+            util_z = 0.0
+            pay_z = 0.0
+            for k_feat, z_val in z_dict.items():
+                kf_up = k_feat.upper()
+                if any(x in kf_up for x in ["UTILIZATION", "BALANCE", "CASH_ADVANCE"]):
+                    util_z = max(util_z, z_val)
+                if any(x in kf_up for x in ["PURCHASES", "PAYMENTS", "FREQUENCY", "ORDERS"]):
+                    act_z = max(act_z, z_val)
+                if "PAYMENT_RATIO" in kf_up or "PRC_FULL" in kf_up:
+                    pay_z = max(pay_z, z_val)
+
+            # Map z-scores to 0-100 bounded scale: sigmoid or clipped linear
+            # High utilization increases risk; high activity decreases risk; high payment ratio decreases risk
+            risk_raw = 50.0 + (util_z * 15.0) - (act_z * 12.0) - (pay_z * 10.0)
+            risk_score = round(float(np.clip(risk_raw, 0.0, 100.0)), 1)
+            risk_formula_explanation = (
+                "Transparent weighted score: Base 50 + (15.0 * Utilization/Debt Z-score) "
+                "- (12.0 * Transaction Activity Z-score) - (10.0 * Payment Ratio/Repayment Z-score), bounded [0, 100]."
+            )
+
             personas_list.append(
                 PersonaProfile(
                     id=c,
@@ -1156,6 +1251,11 @@ class PulseSegmentPipeline:
                     count=cnt,
                     color=palette[idx % len(palette)],
                     centroid_profile=m_dict,
+                    real_unit_centroid=m_dict,
+                    value_score=value_score,
+                    risk_score=risk_score,
+                    value_metric_name=value_metric_name,
+                    risk_formula_explanation=risk_formula_explanation,
                     top_positive_features=top_pos,
                     top_negative_features=top_neg,
                     distinguishing_note=distinguishing_note,
@@ -1201,6 +1301,8 @@ class PulseSegmentPipeline:
             "winning_silhouette": win_exp.get("silhouette_score"),
             "winning_dbi": win_exp.get("davies_bouldin_index"),
             "winning_common_silhouette": win_exp.get("common_space_silhouette"),
+            "global_real_means": {k: round(float(v), 2) for k, v in self._global_means.items()},
+
             "domain_template": domain,
             "box_plots": [b.model_dump() for b in box_plots_list],
             "direction_map": direction_map,
@@ -1437,8 +1539,11 @@ class PulseSegmentPipeline:
 
     def predict_segment(self, features: Dict[str, float]) -> PredictSegmentResponse:
         """Inference endpoint: maps an individual customer feature dictionary to their predicted persona and nearest NBA."""
+        if self._scaler is None:
+            self.preprocess()
         if self._personas_cache is None or self._winning_model is None:
             self.get_growth_personas()
+
 
         row = []
         for col in self._feature_names:
@@ -1464,47 +1569,74 @@ class PulseSegmentPipeline:
         else:
             model_input = scaled_row
 
-        try:
-            pred_cluster = int(self._winning_model.predict(model_input)[0])
-        except Exception:
-            pred_cluster = 0
+        min_dist = 0.5
+        if isinstance(self._winning_model, PulseCluster):
+            df_pt = pd.DataFrame([features])
+            try:
+                pc_labels, pc_confs, pc_dists = self._winning_model.predict_with_confidence(df_pt)
+                pred_cluster = int(pc_labels[0])
+                confidence = round(float(pc_confs[0]) / 100.0, 2)  # 0.0 to 1.0 scale
+                min_dist = float(pc_dists[0])
+            except Exception:
+                pred_cluster = int(self._winning_model.predict(df_pt)[0])
+                confidence = 0.85
+        else:
+            try:
+                pred_cluster = int(self._winning_model.predict(model_input)[0])
+            except Exception:
+                pred_cluster = 0
 
-        confidence = 0.85
-        dists = np.array([0.5])
-        if hasattr(self._winning_model, "predict_proba"):
-            probs = self._winning_model.predict_proba(model_input)[0]
-            confidence = round(float(np.max(probs)), 2)
-        elif hasattr(self._winning_model, "cluster_centers_"):
-            dists = np.linalg.norm(self._winning_model.cluster_centers_ - model_input, axis=1)
-            min_dist = float(np.min(dists))
-            confidence = round(float(1.0 / (1.0 + min_dist * 0.2)), 2)
+            confidence = 0.85
+            if hasattr(self._winning_model, "predict_proba"):
+                probs = self._winning_model.predict_proba(model_input)[0]
+                confidence = round(float(np.max(probs)), 2)
+            elif hasattr(self._winning_model, "cluster_centers_"):
+                dists = np.linalg.norm(self._winning_model.cluster_centers_ - model_input, axis=1)
+                min_dist = float(np.min(dists))
+                confidence = round(float(1.0 / (1.0 + min_dist * 0.2)), 2)
 
         persona = None
         for p in self._personas_cache["personas"]:
-            if p.id == pred_cluster:
+            p_id = p.id if hasattr(p, "id") else p.get("id")
+            if p_id == pred_cluster:
                 persona = p
                 break
         if persona is None:
             persona = self._personas_cache["personas"][0]
 
-        top_traits = [f"{t.feature} (Z={t.z_score})" for t in persona.top_positive_features]
-        recommended_nba = persona.nba_campaigns[0] if persona.nba_campaigns else NBACampaign(
-            title="Standard Engagement Sprint",
-            description="Activate cardholder touchpoints.",
-            expected_roi_lift="+12% Lift",
-            channel="Email",
-            estimated_net_lift_dollars=12000.0,
-            roi_multiple=4.2,
-        )
+        p_name = persona.name if hasattr(persona, "name") else persona.get("name", f"Cluster {pred_cluster}")
+        top_pos = persona.top_positive_features if hasattr(persona, "top_positive_features") else persona.get("top_positive_features", [])
+        top_traits = [f"{t.feature if hasattr(t, 'feature') else t.get('feature')} (Z={t.z_score if hasattr(t, 'z_score') else t.get('z_score')})" for t in top_pos]
+        
+        camps = persona.nba_campaigns if hasattr(persona, "nba_campaigns") else persona.get("nba_campaigns", [])
+        if camps:
+            c0 = camps[0]
+            if isinstance(c0, NBACampaign):
+                recommended_nba = c0
+            elif isinstance(c0, dict):
+                recommended_nba = NBACampaign(**c0)
+            else:
+                recommended_nba = NBACampaign(title=str(c0), description="", expected_roi_lift="+12% Lift", channel="Email")
+        else:
+            recommended_nba = NBACampaign(
+                title="Standard Engagement Sprint",
+                description="Activate cardholder touchpoints.",
+                expected_roi_lift="+12% Lift",
+                channel="Email",
+                estimated_net_lift_dollars=12000.0,
+                roi_multiple=4.2,
+            )
 
         return PredictSegmentResponse(
             cluster_label=pred_cluster,
-            persona_name=persona.name,
+            persona_name=p_name,
             confidence=confidence,
             recommended_nba=recommended_nba,
-            distance_to_centroid=round(float(np.min(dists)) if hasattr(self._winning_model, "cluster_centers_") else 0.5, 3),
+            distance_to_centroid=round(float(min_dist), 3),
             top_traits=top_traits,
         )
+
+
 
     def export_segments_csv(self) -> str:
         """

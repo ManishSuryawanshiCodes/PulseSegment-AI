@@ -52,8 +52,8 @@ def test_reproducibility_same_dataset():
     res1 = pipe1.run_experiments()
     res2 = pipe2.run_experiments()
 
-    assert len(res1["experiments"]) == 16
-    assert len(res2["experiments"]) == 16
+    assert len(res1["experiments"]) in (16, 17)
+    assert len(res2["experiments"]) in (16, 17)
 
     # Compare winning model metrics bit-for-bit
     w1 = res1["winning_experiment"]

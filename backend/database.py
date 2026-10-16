@@ -68,6 +68,19 @@ class Database:
                     PRIMARY KEY (dataset_id, config_hash)
                 )
             """)
+            cursor.execute("""
+                CREATE TABLE IF NOT EXISTS saved_runs (
+                    run_id TEXT PRIMARY KEY,
+                    dataset_id TEXT NOT NULL,
+                    config_hash TEXT NOT NULL,
+                    winning_algorithm TEXT NOT NULL,
+                    winning_space TEXT NOT NULL,
+                    n_clusters INTEGER NOT NULL,
+                    config_json TEXT NOT NULL,
+                    metrics_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                )
+            """)
             conn.commit()
 
     # --- Datasets ---
@@ -265,3 +278,81 @@ class Database:
             if row:
                 return dict(row)
             return None
+
+    # --- Saved Runs Management ---
+
+    def save_run(
+        self,
+        run_id: str,
+        dataset_id: str,
+        config_hash: str,
+        winning_algorithm: str,
+        winning_space: str,
+        n_clusters: int,
+        config_dict: Dict[str, Any],
+        metrics_dict: Dict[str, Any],
+    ):
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                INSERT OR REPLACE INTO saved_runs
+                (run_id, dataset_id, config_hash, winning_algorithm, winning_space, n_clusters, config_json, metrics_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    run_id,
+                    dataset_id,
+                    config_hash,
+                    winning_algorithm,
+                    winning_space,
+                    n_clusters,
+                    json.dumps(config_dict),
+                    json.dumps(metrics_dict),
+                    datetime.datetime.now().isoformat(),
+                ),
+            )
+            conn.commit()
+
+    def list_runs(self, dataset_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            if dataset_id:
+                cursor.execute("SELECT * FROM saved_runs WHERE dataset_id = ? ORDER BY created_at DESC", (dataset_id,))
+            else:
+                cursor.execute("SELECT * FROM saved_runs ORDER BY created_at DESC")
+            rows = cursor.fetchall()
+            return [
+                {
+                    "run_id": row["run_id"],
+                    "dataset_id": row["dataset_id"],
+                    "config_hash": row["config_hash"],
+                    "winning_algorithm": row["winning_algorithm"],
+                    "winning_space": row["winning_space"],
+                    "n_clusters": row["n_clusters"],
+                    "created_at": row["created_at"],
+                    "config": json.loads(row["config_json"]),
+                    "metrics": json.loads(row["metrics_json"]),
+                }
+                for row in rows
+            ]
+
+    def get_run(self, run_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM saved_runs WHERE run_id = ?", (run_id,))
+            row = cursor.fetchone()
+            if row:
+                return {
+                    "run_id": row["run_id"],
+                    "dataset_id": row["dataset_id"],
+                    "config_hash": row["config_hash"],
+                    "winning_algorithm": row["winning_algorithm"],
+                    "winning_space": row["winning_space"],
+                    "n_clusters": row["n_clusters"],
+                    "created_at": row["created_at"],
+                    "config": json.loads(row["config_json"]),
+                    "metrics": json.loads(row["metrics_json"]),
+                }
+            return None
+

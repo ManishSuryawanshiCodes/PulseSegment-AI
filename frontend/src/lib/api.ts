@@ -179,6 +179,11 @@ export interface PersonaProfile {
   distinguishing_note?: string
   assumptions?: PersonaAssumptions
   nba_campaigns: NBACampaign[]
+  real_unit_centroid?: Record<string, number>
+  value_score?: number | null
+  risk_score?: number | null
+  value_metric_name?: string | null
+  risk_formula_explanation?: string | null
 }
 
 export interface ClusterBoxPlotStat {
@@ -203,6 +208,7 @@ export interface GrowthPersonas {
   domain_template?: string
   box_plots?: FeatureBoxPlot[]
   direction_map?: Record<string, string>
+  global_real_means?: Record<string, number>
 }
 
 export interface PredictResponse {
@@ -212,6 +218,76 @@ export interface PredictResponse {
   recommended_nba: NBACampaign
   distance_to_centroid: number
   top_traits: string[]
+}
+
+export interface SegmentScore {
+  cluster_label: number
+  persona_name: string
+  value_score: number
+  risk_score: number
+  customer_count: number
+  customer_pct: number
+  value_metric_name: string
+  formula_explanation: string
+}
+
+export interface CustomerLookupResult {
+  customer_id: string
+  dataset_id: string
+  cluster_label: number
+  persona_name: string
+  confidence: number
+  distance_to_centroid: number
+  distinguishing_traits: string[]
+  customer_features: Record<string, number>
+  cluster_centroid: Record<string, number>
+  differences_vs_cluster: Record<string, number>
+}
+
+export interface SummaryReport {
+  dataset_id: string
+  generated_at: string
+  source_type: 'Template' | 'AI-written'
+  summary_text: string
+  key_findings: string[]
+  aggregate_stats: Record<string, any>
+}
+
+export interface SavedRun {
+  run_id: string
+  dataset_id: string
+  config_hash: string
+  winning_algorithm: string
+  winning_space: string
+  n_clusters: number
+  created_at: string
+  config: Record<string, any>
+  metrics: Record<string, any>
+}
+
+export interface DriftMigrationItem {
+  original_group: string
+  new_group: string
+  count: number
+  percent: number
+}
+
+
+export interface DriftCheckResult {
+  original_dataset_id: string
+  drift_dataset_name: string
+  total_customers: number
+  migration_matrix: number[][]
+  group_names_original: string[]
+  group_names_new: string[]
+  migration_table: {
+    original_group: string
+    new_group: string
+    count: number
+    percent: number
+  }[]
+  stability_index: number
+  drift_alert: string
 }
 
 async function fetchAPI<T>(endpoint: string, options?: RequestInit): Promise<T> {
@@ -283,7 +359,28 @@ export const api = {
       body: JSON.stringify({ features }),
     }),
 
+  // New Intelligence Features
+  getScores: (datasetId: string) => fetchAPI<SegmentScore[]>(`/api/datasets/${datasetId}/scores`),
+  lookupCustomer: (datasetId: string, customerId: string) =>
+    fetchAPI<CustomerLookupResult>(`/api/datasets/${datasetId}/customer/${customerId}`),
+  getSummaryReport: (datasetId: string) => fetchAPI<SummaryReport>(`/api/datasets/${datasetId}/summary-report`),
+  listSavedRuns: (datasetId: string) => fetchAPI<SavedRun[]>(`/api/datasets/${datasetId}/runs`),
+  compareRuns: (run1Id: string, run2Id: string) =>
+    fetchAPI<{ run1: SavedRun; run2: SavedRun; metrics_comparison: Record<string, any>; config_diff: Record<string, any> }>(
+      `/api/runs/compare?run1_id=${encodeURIComponent(run1Id)}&run2_id=${encodeURIComponent(run2Id)}`
+    ),
+  driftCheck: async (datasetId: string, file: File): Promise<DriftCheckResult> => {
+    const formData = new FormData()
+    formData.append('file', file)
+    return fetchAPI<DriftCheckResult>(`/api/datasets/${datasetId}/drift-check`, {
+      method: 'POST',
+      body: formData,
+    })
+  },
+
   exportSegmentsUrl: (datasetId: string) => `${API_BASE}/api/datasets/${datasetId}/export/segments.csv`,
   exportModelUrl: (datasetId: string) => `${API_BASE}/api/datasets/${datasetId}/model.joblib`,
   exportModelJsonUrl: (datasetId: string) => `${API_BASE}/api/datasets/${datasetId}/model.json`,
+  reportHtmlUrl: (datasetId: string) => `${API_BASE}/api/datasets/${datasetId}/report.html`,
+
 }

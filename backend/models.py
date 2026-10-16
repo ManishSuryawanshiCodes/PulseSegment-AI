@@ -48,6 +48,9 @@ class DatasetConfig(BaseModel):
     pca_variance: float = 0.95
     n_clusters: int = 4
     domain_template: str = "credit_card"  # 'credit_card' | 'ecommerce_rfm' | 'saas' | 'generic'
+    enable_pulsecluster: bool = True
+    pulsecluster_ratios: bool = True
+    pulsecluster_time_budget: float = 20.0
 
 
 class ConfigResponse(BaseModel):
@@ -133,6 +136,9 @@ class ExperimentResult(BaseModel):
     reason: Optional[str] = None
     scatter_data: List[Dict[str, Any]] = Field(default_factory=list)
     cluster_sizes: Optional[Dict[int, int]] = Field(default_factory=dict)
+    reliability: Optional[float] = None
+    stability: Optional[float] = None
+    timing_breakdown: Optional[Dict[str, float]] = None
 
 
 class KSweepPoint(BaseModel):
@@ -189,9 +195,14 @@ class PersonaProfile(BaseModel):
     top_positive_features: List[DistinguishingFeature] = Field(default_factory=list)
     top_negative_features: List[DistinguishingFeature] = Field(default_factory=list)
     distinguishing_note: Optional[str] = None
-    characteristics: List[str]
+    characteristics: List[str] = Field(default_factory=list)
     assumptions: Optional[PersonaAssumptions] = None
     nba_campaigns: List[NBACampaign] = Field(default_factory=list)
+    real_unit_centroid: Optional[Dict[str, float]] = Field(default_factory=dict)
+    value_score: Optional[float] = None
+    risk_score: Optional[float] = None
+    value_metric_name: Optional[str] = None
+    risk_formula_explanation: Optional[str] = None
 
 
 class ClusterBoxPlotStat(BaseModel):
@@ -216,6 +227,8 @@ class GrowthPersonas(BaseModel):
     domain_template: Optional[str] = None
     box_plots: Optional[List[FeatureBoxPlot]] = Field(default_factory=list)
     direction_map: Optional[Dict[str, str]] = Field(default_factory=dict)
+    global_real_means: Optional[Dict[str, float]] = Field(default_factory=dict)
+
 
 
 # --- Operational & Inference Models ---
@@ -253,3 +266,77 @@ class ModelJSONExport(BaseModel):
     centroids: Dict[str, Dict[str, float]]
     pca_parameters: Optional[Dict[str, Any]] = None
     personas: List[Dict[str, Any]]
+
+
+# --- New Advanced Intelligence Models ---
+
+class SegmentScores(BaseModel):
+    cluster_label: int
+    persona_name: str
+    value_score: float  # Share of spend/revenue (0-100%)
+    risk_score: float   # Weighted risk score (0-100)
+    customer_count: int
+    customer_pct: float
+    value_metric_name: str
+    formula_explanation: str
+
+
+class CustomerLookupResponse(BaseModel):
+    customer_id: str
+    dataset_id: str
+    cluster_label: int
+    persona_name: str
+    confidence: float
+    distance_to_centroid: float
+    distinguishing_traits: List[str]
+    customer_features: Dict[str, float]
+    cluster_centroid: Dict[str, float]
+    differences_vs_cluster: Dict[str, float]
+
+
+class SummaryReportResponse(BaseModel):
+    dataset_id: str
+    generated_at: str
+    source_type: str  # 'Template' | 'AI-written'
+    summary_text: str
+    key_findings: List[str]
+    aggregate_stats: Dict[str, Any]
+
+
+class SavedRunInfo(BaseModel):
+    run_id: str
+    dataset_id: str
+    config_hash: str
+    winning_algorithm: str
+    winning_space: str
+    n_clusters: int
+    created_at: str
+    config: Dict[str, Any]
+    metrics: Dict[str, Any]
+
+
+class CompareRunsResponse(BaseModel):
+    run1: SavedRunInfo
+    run2: SavedRunInfo
+    metrics_comparison: Dict[str, Dict[str, Any]]
+    config_diff: Dict[str, Any]
+
+
+class DriftMigrationItem(BaseModel):
+    original_group: str
+    new_group: str
+    count: int
+    percent: float
+
+
+class DriftCheckResponse(BaseModel):
+    original_dataset_id: str
+    drift_dataset_name: str
+    total_customers: int
+    migration_matrix: List[List[int]]
+    group_names_original: List[str]
+    group_names_new: List[str]
+    migration_table: List[DriftMigrationItem]
+    stability_index: float  # Percent staying in identical archetype
+    drift_alert: str
+

@@ -112,6 +112,50 @@ export function Step5Act({
   const netLiftDollars = Math.max(0, grossLiftDollars - totalCampaignCost)
   const roiMultiple = totalCampaignCost > 0 ? (grossLiftDollars / totalCampaignCost).toFixed(1) : '1.0'
 
+  // Customer Lookup Modal State
+  const [lookupModalOpen, setLookupModalOpen] = useState<boolean>(false)
+  const [lookupIdInput, setLookupIdInput] = useState<string>('0')
+  const [lookupLoading, setLookupLoading] = useState<boolean>(false)
+  const [lookupResult, setLookupResult] = useState<any | null>(null)
+
+  // Drift Check Modal State
+  const [driftModalOpen, setDriftModalOpen] = useState<boolean>(false)
+  const [driftFile, setDriftFile] = useState<File | null>(null)
+  const [driftLoading, setDriftLoading] = useState<boolean>(false)
+  const [driftResult, setDriftResult] = useState<any | null>(null)
+
+  // Real Units vs Z-Scores View Toggle
+  const [unitsMode, setUnitsMode] = useState<'zscore' | 'real'>('real')
+
+  const handleLookupCustomer = async (e: React.FormEvent) => {
+
+    e.preventDefault()
+    if (!lookupIdInput.trim()) return
+    setLookupLoading(true)
+    try {
+      const res = await api.lookupCustomer(datasetId, lookupIdInput.trim())
+      setLookupResult(res)
+    } catch (err: any) {
+      alert(`Customer lookup failed: ${err.message}`)
+    } finally {
+      setLookupLoading(false)
+    }
+  }
+
+  const handleRunDriftCheck = async (e: React.FormEvent) => {
+    e.preventDefault()
+    if (!driftFile) return
+    setDriftLoading(true)
+    try {
+      const res = await api.driftCheck(datasetId, driftFile)
+      setDriftResult(res)
+    } catch (err: any) {
+      alert(`Drift check failed: ${err.message}`)
+    } finally {
+      setDriftLoading(false)
+    }
+  }
+
   return (
     <div className="space-y-8 animate-fadeIn">
       {/* Action Bar (Top) */}
@@ -127,20 +171,60 @@ export function Step5Act({
             </span>
           </div>
           <p className="text-xs text-[var(--text-muted)] mt-1">
-            Target high-propensity segments with personalized campaigns and deploy customer scoring.
+            Target high-propensity segments with personalized campaigns, real-unit profiles, and automated drift checks.
           </p>
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
-          {/* Score One Customer */}
+          {/* Units Mode Toggle */}
+          <div className="flex items-center rounded-lg border border-[var(--border)] bg-[var(--card-elevated)] p-0.5 text-xs">
+            <button
+              type="button"
+              onClick={() => setUnitsMode('real')}
+              className={`px-2.5 py-1 rounded-md transition-all font-medium ${unitsMode === 'real' ? 'bg-accent-indigo text-white shadow-sm' : 'text-[var(--text-muted)] hover:text-[var(--text)]'}`}
+            >
+              Real Units
+            </button>
+            <button
+              type="button"
+              onClick={() => setUnitsMode('zscore')}
+              className={`px-2.5 py-1 rounded-md transition-all font-medium ${unitsMode === 'zscore' ? 'bg-accent-indigo text-white shadow-sm' : 'text-[var(--text-muted)] hover:text-[var(--text)]'}`}
+            >
+              vs. Average
+            </button>
+          </div>
+
+          {/* Customer Lookup Button */}
           <button
             type="button"
-            onClick={openScoreModal}
-            className="px-3 py-1.5 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] hover:border-accent-indigo/50 text-xs font-medium text-[var(--text)] transition-colors flex items-center gap-1.5"
+            onClick={() => setLookupModalOpen(true)}
+            className="px-3 py-1.5 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] hover:border-accent-indigo/50 text-xs font-medium text-[var(--text)] transition-colors flex items-center gap-1.5 cursor-pointer"
           >
             <UserCheck className="w-3.5 h-3.5 text-accent-indigo" />
-            Score One Customer
+            Customer Lookup
           </button>
+
+          {/* Drift Check Button */}
+          <button
+            type="button"
+            onClick={() => setDriftModalOpen(true)}
+            className="px-3 py-1.5 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] hover:border-accent-amber/50 text-xs font-medium text-[var(--text)] transition-colors flex items-center gap-1.5 cursor-pointer"
+          >
+            <RefreshCw className="w-3.5 h-3.5 text-accent-amber" />
+            Check Drift
+          </button>
+
+          {/* One-Page Report Export */}
+          <a
+            href={api.reportHtmlUrl(datasetId)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="px-3 py-1.5 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] hover:border-accent-emerald/50 text-xs font-medium text-[var(--text)] transition-colors flex items-center gap-1.5"
+            title="Download or print one-page HTML/PDF executive summary"
+          >
+            <Download className="w-3.5 h-3.5 text-accent-emerald" />
+            Executive Report
+          </a>
 
           {/* Export Segments CSV */}
           <a
@@ -149,31 +233,11 @@ export function Step5Act({
             className="px-3 py-1.5 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] hover:border-accent-emerald/50 text-xs font-medium text-[var(--text)] transition-colors flex items-center gap-1.5"
           >
             <Download className="w-3.5 h-3.5 text-accent-emerald" />
-            Export Segments CSV
-          </a>
-
-          {/* Download Model Parameters JSON */}
-          <a
-            href={api.exportModelJsonUrl(datasetId)}
-            download
-            className="px-3 py-1.5 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] hover:border-accent-indigo/50 text-xs font-medium text-[var(--text)] transition-colors flex items-center gap-1.5"
-            title="Download safe, auditable JSON parameters of centroids, scaler, and PCA components"
-          >
-            <Download className="w-3.5 h-3.5 text-accent-indigo" />
-            Model Parameters (.json)
-          </a>
-
-          {/* Download Model Pickle */}
-          <a
-            href={api.exportModelUrl(datasetId)}
-            download
-            className="px-3 py-1.5 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] hover:border-accent-indigo/50 text-xs font-medium text-[var(--text)] transition-colors flex items-center gap-1.5"
-          >
-            <Download className="w-3.5 h-3.5 text-accent-indigo" />
-            Model (.joblib)
+            Segments CSV
           </a>
         </div>
       </div>
+
 
       {/* Persona Cards Grid (4-up on desktop, 2-up on tablet, 1-up on mobile) */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -250,14 +314,26 @@ export function Step5Act({
                   </span>
                 </div>
 
-                {/* Size & Percentage */}
-                <div className="flex items-baseline justify-between border-b border-[var(--border)] pb-2.5">
-                  <span className="text-xl font-bold metric-value text-[var(--text)]">
-                    {formatNumber(persona.count)}
-                  </span>
-                  <span className="text-xs font-mono font-semibold text-accent-indigo">
-                    {persona.percentage.toFixed(1)}% of base
-                  </span>
+                {/* Size, Value Share & Risk Badges */}
+                <div className="space-y-1.5 border-b border-[var(--border)] pb-2.5">
+                  <div className="flex items-baseline justify-between">
+                    <span className="text-xl font-bold metric-value text-[var(--text)]">
+                      {formatNumber(persona.count)}
+                    </span>
+                    <span className="text-xs font-mono font-semibold text-accent-indigo">
+                      {persona.percentage.toFixed(1)}% of base
+                    </span>
+                  </div>
+
+                  {/* Value and Risk Badges */}
+                  <div className="flex items-center justify-between text-[11px] font-mono pt-1">
+                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 font-semibold" title={persona.value_metric_name || 'Share of activity'}>
+                      Val: {persona.value_score != null ? `${persona.value_score.toFixed(1)}%` : `${persona.percentage.toFixed(1)}%`}
+                    </span>
+                    <span className="px-1.5 py-0.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 font-semibold" title={persona.risk_formula_explanation || 'Weighted Risk Score'}>
+                      Risk: {persona.risk_score != null ? `${persona.risk_score.toFixed(0)}/100` : '50/100'}
+                    </span>
+                  </div>
                 </div>
 
                 {/* One-Line Description */}
@@ -265,18 +341,28 @@ export function Step5Act({
                   {persona.characteristics?.[0] || 'Distinct customer behavior group discovered through clustering boundaries.'}
                 </p>
 
-                {/* Diverging Centroid Bar Chart (Z-Scores vs Global Average) */}
+                {/* Distinguishing Behavior: Real Units or Z-Scores vs Global Average */}
                 <div className="space-y-1.5 pt-1">
                   <span className="text-[10px] font-semibold uppercase tracking-wider text-[var(--text-muted)] block">
-                    Distinguishing Behavior (Z-Scores vs. Avg)
+                    {unitsMode === 'real' ? 'Group Profile (Real Units)' : 'Distinguishing Behavior (Z-Scores vs. Avg)'}
                   </span>
 
                   <div className="space-y-1 text-[11px] font-mono">
-                    {allTraits.length < 2 ? (
+                    {unitsMode === 'real' ? (
+                      Object.entries(persona.centroid_profile || {}).slice(0, 5).map(([feat, val]) => (
+                        <div key={feat} className="flex justify-between text-[10px] py-0.5 border-b border-[var(--border)]/40">
+                          <span className="truncate max-w-[130px] text-[var(--text-muted)]">{feat}</span>
+                          <span className="text-[var(--text)] font-semibold">
+                            {formatNumber(val)}
+                          </span>
+                        </div>
+                      ))
+                    ) : allTraits.length < 2 ? (
                       <div className="py-2.5 px-3 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] text-[11px] text-[var(--text-muted)] italic font-sans leading-relaxed">
                         {persona.distinguishing_note || 'This group differs only slightly from average.'}
                       </div>
                     ) : (
+
                       allTraits.map((t) => {
                         const isPos = t.z_score >= 0
                         const barWidth = Math.min(100, Math.abs(t.z_score) * 45)
@@ -687,6 +773,146 @@ export function Step5Act({
           </div>
         </div>
       )}
+
+      {/* Customer Lookup Modal */}
+      {lookupModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setLookupModalOpen(false)} />
+          <div className="relative w-full max-w-lg bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 shadow-2xl z-10 space-y-4">
+            <div className="flex items-center justify-between border-b border-[var(--border)] pb-3">
+              <h3 className="font-bold text-base flex items-center gap-2">
+                <UserCheck className="w-4 h-4 text-accent-indigo" />
+                Customer Segment & Trait Lookup
+              </h3>
+              <button onClick={() => setLookupModalOpen(false)} className="text-[var(--text-muted)] hover:text-[var(--text)]">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleLookupCustomer} className="space-y-3">
+              <div>
+                <label className="text-xs text-[var(--text-muted)] block mb-1">
+                  Customer ID or Row Index
+                </label>
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={lookupIdInput}
+                    onChange={(e) => setLookupIdInput(e.target.value)}
+                    placeholder="e.g. C10001 or 0"
+                    className="flex-1 text-xs font-mono bg-[var(--card-elevated)] border border-[var(--border)] rounded px-3 py-2 text-[var(--text)] focus:outline-none focus:border-accent-indigo"
+                  />
+                  <button
+                    type="submit"
+                    disabled={lookupLoading}
+                    className="px-4 py-2 bg-accent-indigo hover:bg-accent-indigo/90 text-white rounded text-xs font-semibold cursor-pointer disabled:opacity-50"
+                  >
+                    {lookupLoading ? 'Searching...' : 'Lookup'}
+                  </button>
+                </div>
+              </div>
+            </form>
+
+            {lookupResult && (
+              <div className="mt-4 p-4 rounded-xl bg-[var(--card-elevated)] border border-[var(--border)] space-y-3 animate-fadeIn">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold text-sm text-[var(--text)]">{lookupResult.persona_name}</span>
+                  <span className="text-xs font-mono px-2 py-0.5 rounded bg-accent-emerald/10 border border-accent-emerald/30 text-accent-emerald">
+                    {(lookupResult.confidence * 100).toFixed(0)}% Confidence
+                  </span>
+                </div>
+
+                <div className="text-xs text-[var(--text-muted)]">
+                  Distance to group centroid: <span className="font-mono text-[var(--text)]">{lookupResult.distance_to_centroid}</span>
+                </div>
+
+                <div>
+                  <span className="text-[10px] uppercase font-semibold text-[var(--text-muted)] block mb-1">
+                    What Makes Them Different (vs Group Centroid):
+                  </span>
+                  <div className="max-h-40 overflow-y-auto space-y-1 font-mono text-[11px]">
+                    {Object.entries(lookupResult.differences_vs_cluster || {}).slice(0, 6).map(([feat, diff]) => (
+                      <div key={feat} className="flex justify-between py-0.5 border-b border-[var(--border)]/30">
+                        <span className="truncate max-w-[160px] text-[var(--text-muted)]">{feat}</span>
+                        <span className={Number(diff) >= 0 ? 'text-accent-emerald' : 'text-rose-400'}>
+                          {Number(diff) >= 0 ? `+${diff}` : `${diff}`}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Drift Check Modal */}
+      {driftModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setDriftModalOpen(false)} />
+          <div className="relative w-full max-w-lg bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 shadow-2xl z-10 space-y-4">
+            <div className="flex items-center justify-between border-b border-[var(--border)] pb-3">
+              <h3 className="font-bold text-base flex items-center gap-2">
+                <RefreshCw className="w-4 h-4 text-accent-amber" />
+                Customer Drift & Migration Analysis
+              </h3>
+              <button onClick={() => setDriftModalOpen(false)} className="text-[var(--text-muted)] hover:text-[var(--text)]">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form onSubmit={handleRunDriftCheck} className="space-y-3">
+              <div>
+                <label className="text-xs text-[var(--text-muted)] block mb-1">
+                  Upload Newer Tabular File (CSV / XLSX)
+                </label>
+                <input
+                  type="file"
+                  accept=".csv,.xlsx"
+                  onChange={(e) => setDriftFile(e.target.files?.[0] || null)}
+                  className="w-full text-xs font-mono bg-[var(--card-elevated)] border border-[var(--border)] rounded p-2 text-[var(--text)]"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={!driftFile || driftLoading}
+                className="w-full py-2.5 bg-accent-amber hover:bg-accent-amber/90 text-black font-semibold rounded text-xs cursor-pointer disabled:opacity-50"
+              >
+                {driftLoading ? 'Comparing with Saved Model...' : 'Run Migration & Drift Analysis'}
+              </button>
+            </form>
+
+            {driftResult && (
+              <div className="mt-4 p-4 rounded-xl bg-[var(--card-elevated)] border border-[var(--border)] space-y-3 animate-fadeIn">
+                <div className="p-2.5 rounded bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs font-semibold">
+                  {driftResult.drift_alert}
+                </div>
+
+                <div className="text-xs text-[var(--text-muted)] flex justify-between">
+                  <span>Stability Index: <strong className="font-mono text-[var(--text)]">{driftResult.stability_index}%</strong></span>
+                  <span>Evaluated Records: <strong className="font-mono text-[var(--text)]">{formatNumber(driftResult.total_customers)}</strong></span>
+                </div>
+
+
+                <div className="max-h-48 overflow-y-auto space-y-1 font-mono text-[11px]">
+                  <span className="text-[10px] uppercase font-semibold text-[var(--text-muted)] block mb-1">
+                    Migration Table (Group A → Group B)
+                  </span>
+                  {driftResult.migration_table.slice(0, 8).map((item: any, i: number) => (
+                    <div key={i} className="flex justify-between py-0.5 border-b border-[var(--border)]/30 text-[10px]">
+                      <span className="truncate max-w-[180px]">{item.original_group} → {item.new_group}</span>
+                      <span className="font-semibold text-[var(--text)]">{item.count} ({item.percent}%)</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
+
