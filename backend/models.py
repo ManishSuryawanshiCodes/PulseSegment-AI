@@ -10,6 +10,8 @@ class DatasetInfo(BaseModel):
     row_count: int
     col_count: int
     is_synthetic: bool = False
+    real_file_missing: bool = False
+    real_file_path: Optional[str] = None
     created_at: str
     has_results: bool = False
 
@@ -30,6 +32,8 @@ class DatasetProfile(BaseModel):
     row_count: int
     col_count: int
     is_synthetic: bool = False
+    real_file_missing: bool = False
+    real_file_path: Optional[str] = None
     columns: List[ColumnProfile]
     preview: List[Dict[str, Any]] = Field(default_factory=list)
 
@@ -116,6 +120,9 @@ class ExperimentResult(BaseModel):
     silhouette_score: Optional[float] = None
     davies_bouldin_index: Optional[float] = None
     calinski_harabasz_score: Optional[float] = None
+    common_space_silhouette: Optional[float] = None
+    common_space_dbi: Optional[float] = None
+    common_space_chi: Optional[float] = None
     composite_score: Optional[float] = None
     execution_time_ms: float
     cluster_count: int
@@ -132,6 +139,8 @@ class KSweepPoint(BaseModel):
     k: int
     inertia: float
     silhouette: Optional[float] = None
+    composite_rank: Optional[float] = None
+    min_cluster_size_pct: Optional[float] = None
 
 
 class ExperimentsMatrix(BaseModel):
@@ -142,6 +151,7 @@ class ExperimentsMatrix(BaseModel):
     selection_formula: Optional[str] = None
     k_sweep: Optional[List[KSweepPoint]] = None
     suggested_k: Optional[int] = None
+    suggested_k_reason: Optional[str] = None
 
 
 # --- Growth Personas & Next-Best-Action (NBA) Models ---
@@ -178,6 +188,7 @@ class PersonaProfile(BaseModel):
     centroid_profile: Dict[str, float]
     top_positive_features: List[DistinguishingFeature] = Field(default_factory=list)
     top_negative_features: List[DistinguishingFeature] = Field(default_factory=list)
+    distinguishing_note: Optional[str] = None
     characteristics: List[str]
     assumptions: Optional[PersonaAssumptions] = None
     nba_campaigns: List[NBACampaign] = Field(default_factory=list)
@@ -230,3 +241,15 @@ class PredictSegmentResponse(BaseModel):
     recommended_nba: NBACampaign
     distance_to_centroid: float
     top_traits: List[str]
+
+
+class ModelJSONExport(BaseModel):
+    dataset_id: str
+    exported_at: str
+    winning_algorithm: str
+    winning_space: str
+    feature_names: List[str]
+    scaler: Dict[str, Any]
+    centroids: Dict[str, Dict[str, float]]
+    pca_parameters: Optional[Dict[str, Any]] = None
+    personas: List[Dict[str, Any]]

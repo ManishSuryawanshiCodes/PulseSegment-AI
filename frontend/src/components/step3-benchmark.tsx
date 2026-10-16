@@ -55,7 +55,7 @@ export function Step3Benchmark({
   const [viewMode, setViewMode] = useState<'simple' | 'expert'>('simple')
 
   // Grouped Bar Chart metric switcher
-  const [activeMetric, setActiveMetric] = useState<'silhouette' | 'dbi' | 'chi' | 'speed'>('silhouette')
+  const [activeMetric, setActiveMetric] = useState<'silhouette' | 'common_space' | 'dbi' | 'chi' | 'speed'>('silhouette')
 
   // Table filter & sort state
   const [filterAlg, setFilterAlg] = useState<string>('all')
@@ -175,6 +175,7 @@ export function Step3Benchmark({
       .forEach((e) => {
         let val: number | null = 0
         if (activeMetric === 'silhouette') val = e.silhouette_score
+        else if (activeMetric === 'common_space') val = e.common_space_silhouette ?? null
         else if (activeMetric === 'dbi') val = e.davies_bouldin_index
         else if (activeMetric === 'chi') val = e.calinski_harabasz_score
         else if (activeMetric === 'speed') val = e.execution_time_ms
@@ -396,6 +397,17 @@ export function Step3Benchmark({
             </button>
             <button
               type="button"
+              onClick={() => setActiveMetric('common_space')}
+              className={`px-2.5 py-1 rounded transition-colors ${
+                activeMetric === 'common_space'
+                  ? 'bg-accent-indigo text-white font-semibold'
+                  : 'text-[var(--text-muted)] hover:text-[var(--text)]'
+              }`}
+            >
+              Common Space
+            </button>
+            <button
+              type="button"
               onClick={() => setActiveMetric('dbi')}
               className={`px-2.5 py-1 rounded transition-colors ${
                 activeMetric === 'dbi'
@@ -453,10 +465,10 @@ export function Step3Benchmark({
                 wrapperStyle={{ fontSize: '11px', paddingTop: '10px' }}
                 iconType="circle"
               />
-              <Bar dataKey="KMeans" name="K-Means" fill="#6366F1" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="Agglomerative" name="Agglomerative" fill="#10B981" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="DBSCAN" name="DBSCAN" fill="#F59E0B" radius={[4, 4, 0, 0]} />
-              <Bar dataKey="GaussianMixture" name="GMM" fill="#8B5CF6" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="KMeans" name="K-Means" fill="#2563EB" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="Agglomerative" name="Agglomerative" fill="#D97706" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="DBSCAN" name="DBSCAN" fill="#0D9488" radius={[4, 4, 0, 0]} />
+              <Bar dataKey="GaussianMixture" name="GMM" fill="#E11D48" radius={[4, 4, 0, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>
@@ -529,6 +541,15 @@ export function Step3Benchmark({
                 >
                   <div className="flex items-center justify-end gap-1">
                     Silhouette <ArrowUpDown className="w-3 h-3" />
+                  </div>
+                </th>
+                <th
+                  onClick={() => handleSort('common_space_silhouette')}
+                  className="px-3 py-2.5 font-semibold cursor-pointer hover:text-[var(--text)] text-right"
+                  title="Common-space clarity: Silhouette computed on DS1_Original scaled"
+                >
+                  <div className="flex items-center justify-end gap-1">
+                    Common Space <ArrowUpDown className="w-3 h-3" />
                   </div>
                 </th>
 
@@ -626,6 +647,19 @@ export function Step3Benchmark({
                       )}
                     </td>
 
+                    {/* Common-Space Clarity */}
+                    <td className="px-3 py-2.5 text-right whitespace-nowrap">
+                      {exp.common_space_silhouette !== null && exp.common_space_silhouette !== undefined ? (
+                        <span className="text-accent-indigo font-bold">
+                          {exp.common_space_silhouette.toFixed(3)}
+                        </span>
+                      ) : (
+                        <span className="text-[var(--text-muted)] italic text-[10px]">
+                          —
+                        </span>
+                      )}
+                    </td>
+
                     {/* Expert: DBI */}
                     {viewMode === 'expert' && (
                       <td className="px-3 py-2.5 text-right whitespace-nowrap">
@@ -668,18 +702,27 @@ export function Step3Benchmark({
                     {/* Simple (Stars) or Expert (Cluster counts) */}
                     <td className="px-3 py-2.5 text-center whitespace-nowrap">
                       {viewMode === 'simple' ? (
-                        <div className="flex items-center justify-center gap-0.5 text-accent-amber">
-                          {[1, 2, 3, 4, 5].map((star) => (
-                            <Star
-                              key={star}
-                              className={`w-3 h-3 ${
-                                star <= getStarRating(exp.composite_score)
-                                  ? 'fill-accent-amber text-accent-amber'
-                                  : 'text-[var(--border)]'
-                              }`}
-                            />
-                          ))}
-                        </div>
+                        exp.silhouette_score === null ? (
+                          <span
+                            className="text-[var(--text-muted)] italic text-[10px]"
+                            title={exp.reason || 'Density method found no clear groups'}
+                          >
+                            No clear groups
+                          </span>
+                        ) : (
+                          <div className="flex items-center justify-center gap-0.5 text-accent-amber">
+                            {[1, 2, 3, 4, 5].map((star) => (
+                              <Star
+                                key={star}
+                                className={`w-3 h-3 ${
+                                  star <= getStarRating(exp.composite_score)
+                                    ? 'fill-accent-amber text-accent-amber'
+                                    : 'text-[var(--border)]'
+                                }`}
+                              />
+                            ))}
+                          </div>
+                        )
                       ) : (
                         <span className="text-[var(--text)]">
                           {exp.cluster_count} {exp.noise_percentage > 0 ? `(${exp.noise_percentage}% noise)` : ''}

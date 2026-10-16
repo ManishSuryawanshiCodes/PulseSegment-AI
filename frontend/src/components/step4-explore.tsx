@@ -56,10 +56,18 @@ export function Step4Explore({
   onRerunWithK,
   onAdvanceToAct,
 }: Step4ExploreProps) {
-  const [selectedDataset, setSelectedDataset] = useState<string>('DS4_PCA95')
-  const [selectedAlgorithm, setSelectedAlgorithm] = useState<string>('KMeans')
+  const winner = matrix?.winning_experiment
+  const [selectedDataset, setSelectedDataset] = useState<string>(() => winner?.dataset_name || 'DS1_Original')
+  const [selectedAlgorithm, setSelectedAlgorithm] = useState<string>(() => winner?.algorithm || 'KMeans')
   const [kChoice, setKChoice] = useState<number>(config?.n_clusters || 4)
   const [isRerunning, setIsRerunning] = useState<boolean>(false)
+
+  React.useEffect(() => {
+    if (winner) {
+      setSelectedDataset(winner.dataset_name)
+      setSelectedAlgorithm(winner.algorithm)
+    }
+  }, [winner?.dataset_name, winner?.algorithm])
 
   const experiments = matrix?.experiments || []
 
@@ -68,6 +76,17 @@ export function Step4Explore({
     experiments.find(
       (e) => e.dataset_name === selectedDataset && e.algorithm === selectedAlgorithm
     ) || matrix?.winning_experiment || experiments[0]
+
+  // Dynamic clarity text based on common-space silhouette (or raw silhouette)
+  const clarityScore = currentExp?.common_space_silhouette ?? currentExp?.silhouette_score ?? 0
+  let clarityText = ''
+  if (clarityScore >= 0.5) {
+    clarityText = 'Groups are clearly separated.'
+  } else if (clarityScore >= 0.25) {
+    clarityText = 'Groups are reasonably distinct but overlap somewhat.'
+  } else {
+    clarityText = 'Groups overlap a lot, so treat them as rough guidance.'
+  }
 
   // Scatter points (500 sampled points from backend)
   const rawScatter = currentExp?.scatter_data || []
@@ -138,7 +157,12 @@ export function Step4Explore({
               <ScatterChart className="w-4 h-4 text-accent-indigo" />
               2D Principal Component Projection (PC1 &times; PC2)
             </h3>
-            <p className="text-xs text-[var(--text-muted)] mt-0.5">
+            <div className="flex items-center gap-2 mt-1">
+              <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--card-elevated)] border border-[var(--border)] text-accent-indigo">
+                Showing: {currentExp?.algorithm || 'K-Means'} on {currentExp?.dataset_name || 'Winning Model'} ({currentExp?.dataset_dim || ''})
+              </span>
+            </div>
+            <p className="text-xs text-[var(--text-muted)] mt-1">
               Visualizes non-linear cluster separation in 2D space. Hover over points to inspect segment assignment.
             </p>
           </div>
@@ -241,7 +265,7 @@ export function Step4Explore({
             <span className="font-semibold text-[var(--text)] block">What am I looking at?</span>
             <span>
               Each dot represents an individual customer mapped along their two strongest behavioral dimensions (PC1 and PC2).
-              Dots with the same color belong to the same cluster. Notice how the groups form distinct islands without overlapping.
+              Dots with the same color belong to the same cluster. {clarityText}
               <span className="text-[11px] block mt-0.5 font-mono text-[var(--text-muted)]">
                 * Displaying 500 stratified sampled points for rendering responsiveness; true portfolio sizes shown in legend.
               </span>
@@ -313,7 +337,11 @@ export function Step4Explore({
           <div>
             <span className="font-semibold text-[var(--text)] block">Optimal Choice Recommendation</span>
             <span>
-              The algorithm identified <strong className="text-accent-emerald font-mono">k={suggestedK}</strong> as the mathematically optimal cluster configuration, maximizing silhouette separation while preserving distinct actionable customer cohorts.
+              {matrix?.suggested_k_reason || (
+                <>
+                  The algorithm identified <strong className="text-accent-emerald font-mono">k={suggestedK}</strong> using composite rank evaluation (Silhouette, Calinski-Harabasz, and Davies-Bouldin) with minimum segment size ≥3% of records.
+                </>
+              )}
             </span>
           </div>
         </div>
@@ -328,7 +356,12 @@ export function Step4Explore({
                 <BarChart2 className="w-4 h-4 text-accent-indigo" />
                 Per-Cluster Feature Box Plots & Distributions
               </h3>
-              <p className="text-xs text-[var(--text-muted)] mt-0.5">
+              <div className="flex items-center gap-2 mt-1">
+                <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--card-elevated)] border border-[var(--border)] text-accent-indigo">
+                  Showing: {currentExp?.algorithm || 'K-Means'} on {currentExp?.dataset_name || 'Winning Model'} ({currentExp?.dataset_dim || ''})
+                </span>
+              </div>
+              <p className="text-xs text-[var(--text-muted)] mt-1">
                 Inspect quartile spreads (Q1, median, Q3) and min/max whiskers across each customer segment in original feature units.
               </p>
             </div>

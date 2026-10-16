@@ -368,8 +368,9 @@ function PulseSegmentApp() {
                 </span>
 
                 {activeDataset?.is_synthetic && (
-                  <span className="px-1.5 py-0.2 rounded text-[10px] font-semibold bg-amber-500/15 text-amber-400 border border-amber-500/30">
-                    SYNTHETIC
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-500 dark:text-amber-400 border border-amber-500/30 flex items-center gap-1 shadow-sm">
+                    <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
+                    Demo data
                   </span>
                 )}
 

@@ -131,9 +131,16 @@ export function HelpDrawer({ open, onClose }: HelpDrawerProps) {
                 <p className="text-[var(--text-muted)] leading-relaxed">
                   The winning model is selected via a balanced composite index:
                   <code className="block mt-1 p-1 bg-zinc-950/60 rounded text-[10px] text-accent-indigo font-mono">
-                    composite_score = (norm_sil + (1 - norm_dbi) + norm_chi) / 3
+                    composite_score = (norm_common_sil + (1 - norm_common_dbi) + norm_common_chi) / 3
                   </code>
-                  where each metric is min-max normalized across all 16 runs.
+                  where each metric is evaluated in the common standardized feature space (DS1) and min-max normalized across all 16 runs.
+                </p>
+              </div>
+
+              <div className="p-3 rounded-md bg-[var(--card-elevated)] border border-[var(--border)] space-y-1.5">
+                <span className="font-semibold text-accent-indigo block">Common-Space Clarity & Dimensional Comparability</span>
+                <p className="text-[var(--text-muted)] leading-relaxed">
+                  Silhouette scores calculated across spaces with different dimensionality (e.g., 17 original features vs 4 PCA components) cannot be mathematically compared directly because Euclidean distance scales with dimension count. PulseSegment AI solves this by measuring each run&apos;s discovered customer cluster boundaries in a unified, standardized original feature space (<code className="text-accent-indigo font-mono">DS1_Original</code>, sampled to 5,000 points if N &gt; 8,000). This provides an objective, apples-to-apples basis for benchmark comparison and winning model selection.
                 </p>
               </div>
 

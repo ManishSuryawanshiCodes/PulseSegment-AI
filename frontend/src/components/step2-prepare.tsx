@@ -253,7 +253,7 @@ export function Step2Prepare({
               Correlation Heatmap (Lower Triangle Only)
             </h3>
             <p className="text-xs text-[var(--text-muted)] mt-0.5">
-              Identifies multicollinear metrics with Pearson $|r| &gt; {corrThreshold.toFixed(2)}$. Highlighted cells mark redundant features pruned in DS2.
+              Identifies multicollinear metrics with Pearson |r| &gt; {corrThreshold.toFixed(2)}. Highlighted cells mark redundant features pruned in DS2.
             </p>
           </div>
 

@@ -170,6 +170,21 @@ export function Step1Data({
 
   return (
     <div className="space-y-8 animate-fadeIn">
+      {/* Real Kaggle File Missing Notice Card */}
+      {(currentDataset?.real_file_missing || profile?.real_file_missing) && (
+        <div className="p-4 rounded-xl bg-amber-500/10 border border-amber-500/30 text-amber-300 text-xs flex items-start gap-3 shadow-sm">
+          <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <span className="font-semibold text-amber-200 block text-sm">
+              Using demo data. Add the real credit card file for real results
+            </span>
+            <p className="text-zinc-300 text-xs leading-relaxed">
+              Expected file path: <code className="px-1.5 py-0.5 rounded bg-zinc-900 border border-zinc-800 text-amber-300 font-mono text-[11px] select-all">{currentDataset?.real_file_path || profile?.real_file_path || 'backend/data/cc_general.csv'}</code>
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* 1. Large Dropzone Card */}
       <div className="bg-[var(--card)] border border-[var(--border)] rounded-xl p-6 shadow-sm">
         <input
@@ -222,7 +237,7 @@ export function Step1Data({
               className="px-3 py-1.5 rounded-md bg-[var(--card-elevated)] border border-[var(--border)] hover:border-accent-indigo/50 text-[var(--text)] font-medium transition-colors flex items-center gap-1.5"
             >
               <Sparkles className="w-3.5 h-3.5 text-accent-indigo" />
-              Try the sample dataset (Credit Card N=8,950)
+              {currentDataset?.is_synthetic ? 'Try demo data (synthetic)' : 'Try credit card data'}
             </button>
           </div>
 

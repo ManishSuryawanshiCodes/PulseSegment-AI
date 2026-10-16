@@ -121,7 +121,12 @@ export function Step5Act({
             <Target className="w-4 h-4 text-accent-indigo" />
             Customer Growth Intelligence & Activation
           </h2>
-          <p className="text-xs text-[var(--text-muted)] mt-0.5">
+          <div className="flex items-center gap-2 mt-1">
+            <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-[var(--card-elevated)] border border-[var(--border)] text-accent-indigo">
+              Showing: {personasData?.winning_model || 'Winning Model'}
+            </span>
+          </div>
+          <p className="text-xs text-[var(--text-muted)] mt-1">
             Target high-propensity segments with personalized campaigns and deploy customer scoring.
           </p>
         </div>
@@ -147,14 +152,25 @@ export function Step5Act({
             Export Segments CSV
           </a>
 
-          {/* Download Model */}
+          {/* Download Model Parameters JSON */}
+          <a
+            href={api.exportModelJsonUrl(datasetId)}
+            download
+            className="px-3 py-1.5 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] hover:border-accent-indigo/50 text-xs font-medium text-[var(--text)] transition-colors flex items-center gap-1.5"
+            title="Download safe, auditable JSON parameters of centroids, scaler, and PCA components"
+          >
+            <Download className="w-3.5 h-3.5 text-accent-indigo" />
+            Model Parameters (.json)
+          </a>
+
+          {/* Download Model Pickle */}
           <a
             href={api.exportModelUrl(datasetId)}
             download
             className="px-3 py-1.5 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] hover:border-accent-indigo/50 text-xs font-medium text-[var(--text)] transition-colors flex items-center gap-1.5"
           >
             <Download className="w-3.5 h-3.5 text-accent-indigo" />
-            Download Model (.joblib)
+            Model (.joblib)
           </a>
         </div>
       </div>
@@ -256,42 +272,48 @@ export function Step5Act({
                   </span>
 
                   <div className="space-y-1 text-[11px] font-mono">
-                    {allTraits.map((t) => {
-                      const isPos = t.z_score >= 0
-                      const barWidth = Math.min(100, Math.abs(t.z_score) * 45)
+                    {allTraits.length < 2 ? (
+                      <div className="py-2.5 px-3 rounded-lg bg-[var(--card-elevated)] border border-[var(--border)] text-[11px] text-[var(--text-muted)] italic font-sans leading-relaxed">
+                        {persona.distinguishing_note || 'This group differs only slightly from average.'}
+                      </div>
+                    ) : (
+                      allTraits.map((t) => {
+                        const isPos = t.z_score >= 0
+                        const barWidth = Math.min(100, Math.abs(t.z_score) * 45)
 
-                      return (
-                        <div key={t.feature} className="space-y-0.5">
-                          <div className="flex justify-between text-[10px] text-[var(--text-muted)]">
-                            <span className="truncate max-w-[120px]">{t.feature}</span>
-                            <span className={isPos ? 'text-accent-emerald font-semibold' : 'text-rose-400 font-semibold'}>
-                              {t.z_score > 0 ? `+${t.z_score.toFixed(2)}σ` : `${t.z_score.toFixed(2)}σ`}
-                            </span>
-                          </div>
+                        return (
+                          <div key={t.feature} className="space-y-0.5">
+                            <div className="flex justify-between text-[10px] text-[var(--text-muted)]">
+                              <span className="truncate max-w-[120px]">{t.feature}</span>
+                              <span className={isPos ? 'text-accent-emerald font-semibold' : 'text-rose-400 font-semibold'}>
+                                {t.z_score > 0 ? `+${t.z_score.toFixed(2)}σ` : `${t.z_score.toFixed(2)}σ`}
+                              </span>
+                            </div>
 
-                          {/* Diverging Bar: Left for negative, Right for positive */}
-                          <div className="w-full bg-[var(--border)] h-1.5 rounded-full flex relative overflow-hidden">
-                            <div className="w-1/2 flex justify-end">
-                              {!isPos && (
-                                <div
-                                  className="h-full bg-rose-500 rounded-l-full"
-                                  style={{ width: `${barWidth}%` }}
-                                />
-                              )}
-                            </div>
-                            <div className="w-px bg-[var(--text-muted)] h-full z-10" />
-                            <div className="w-1/2 flex justify-start">
-                              {isPos && (
-                                <div
-                                  className="h-full bg-emerald-500 rounded-r-full"
-                                  style={{ width: `${barWidth}%` }}
-                                />
-                              )}
+                            {/* Diverging Bar: Left for negative, Right for positive */}
+                            <div className="w-full bg-[var(--border)] h-1.5 rounded-full flex relative overflow-hidden">
+                              <div className="w-1/2 flex justify-end">
+                                {!isPos && (
+                                  <div
+                                    className="h-full bg-rose-500 rounded-l-full"
+                                    style={{ width: `${barWidth}%` }}
+                                  />
+                                )}
+                              </div>
+                              <div className="w-px bg-[var(--text-muted)] h-full z-10" />
+                              <div className="w-1/2 flex justify-start">
+                                {isPos && (
+                                  <div
+                                    className="h-full bg-emerald-500 rounded-r-full"
+                                    style={{ width: `${barWidth}%` }}
+                                  />
+                                )}
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      )
-                    })}
+                        )
+                      })
+                    )}
                   </div>
                 </div>
               </div>

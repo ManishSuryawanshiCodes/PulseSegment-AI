@@ -1,4 +1,7 @@
 import os
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 import datetime
 import time
 import io
@@ -13,9 +16,9 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.impute import KNNImputer
 from sklearn.decomposition import PCA
 from sklearn.feature_selection import SelectKBest, mutual_info_classif
-from sklearn.cluster import KMeans, AgglomerativeClustering, DBSCAN
+from sklearn.cluster import KMeans, MiniBatchKMeans, AgglomerativeClustering, DBSCAN
 from sklearn.mixture import GaussianMixture
-from sklearn.neighbors import NearestNeighbors
+from sklearn.neighbors import NearestNeighbors, NearestCentroid
 from sklearn.metrics import silhouette_score, davies_bouldin_score, calinski_harabasz_score
 import joblib
 
@@ -146,11 +149,13 @@ class PulseSegmentPipeline:
         config: Optional[DatasetConfig] = None,
         dataset_id: str = "default",
         is_synthetic: bool = False,
+        db: Optional[Any] = None,
     ):
         self.dataset_id = dataset_id
         self.is_synthetic = is_synthetic
         self.config = config or DatasetConfig()
         self.config_hash = self._compute_config_hash(self.config)
+        self.db = db
 
         self._raw_df = df.copy()
         self._numeric_cols: List[str] = []
@@ -163,7 +168,7 @@ class PulseSegmentPipeline:
         self._global_means: Dict[str, float] = {}
         self._global_stds: Dict[str, float] = {}
 
-        # Preprocessed dataframes
+        # Preprocessed dataframes (float32 optimized)
         self._winsorized_df: Optional[pd.DataFrame] = None
         self._processed_df: Optional[pd.DataFrame] = None
         self._datasets: Dict[str, pd.DataFrame] = {}
@@ -181,6 +186,15 @@ class PulseSegmentPipeline:
         self._winning_labels: Optional[np.ndarray] = None
         self._winning_dataset_name: Optional[str] = None
         self._winning_alg_name: Optional[str] = None
+
+        # Try loading cached results from SQLite if available
+        if self.db:
+            cached = self.db.get_pipeline_cache(self.dataset_id, self.config_hash)
+            if cached:
+                self._summary_cache = cached.get("summary")
+                self._feature_engineering_cache = cached.get("features")
+                self._experiments_cache = cached.get("experiments")
+                self._personas_cache = cached.get("personas")
 
     def _compute_config_hash(self, config: DatasetConfig) -> str:
         raw = json.dumps(config.model_dump(), sort_keys=True)
@@ -202,18 +216,16 @@ class PulseSegmentPipeline:
 
         # Keep only numerical columns
         numeric_df = df.select_dtypes(include=[np.number]).copy()
-        # Drop columns with 0 variance or all NaNs
         valid_cols = []
         for col in numeric_df.columns:
             if numeric_df[col].dropna().nunique() > 1:
                 valid_cols.append(col)
 
         if len(valid_cols) < 3:
-            # Fallback to all numeric if filtering was too aggressive
             valid_cols = list(numeric_df.columns)
 
         self._numeric_cols = valid_cols
-        return numeric_df[valid_cols]
+        return numeric_df[valid_cols].astype(np.float32)
 
     def preprocess(self) -> pd.DataFrame:
         """
@@ -222,6 +234,7 @@ class PulseSegmentPipeline:
         2. Dynamic KNN Imputation (k=config.imputation_k)
         3. Dynamic Tukey IQR Winsorization (config.iqr_multiplier)
         4. StandardScaler Z-Score Normalization
+        Uses float32 matrices for speed.
         """
         if self._processed_df is not None:
             return self._processed_df
@@ -251,7 +264,7 @@ class PulseSegmentPipeline:
                 imputed_arr = self._imputer.transform(df_num)
             else:
                 imputed_arr = self._imputer.fit_transform(df_num)
-            imputed_df = pd.DataFrame(imputed_arr, columns=self._feature_names, index=df_num.index)
+            imputed_df = pd.DataFrame(imputed_arr, columns=self._feature_names, index=df_num.index, dtype=np.float32)
         else:
             imputed_df = df_num.copy()
 
@@ -272,10 +285,10 @@ class PulseSegmentPipeline:
 
         self._winsorized_df = winsor_df
 
-        # Step 4: StandardScaler Normalization
+        # Step 4: StandardScaler Normalization (float32)
         self._scaler = StandardScaler()
-        scaled_arr = self._scaler.fit_transform(winsor_df)
-        self._processed_df = pd.DataFrame(scaled_arr, columns=self._feature_names, index=winsor_df.index)
+        scaled_arr = self._scaler.fit_transform(winsor_df).astype(np.float32)
+        self._processed_df = pd.DataFrame(scaled_arr, columns=self._feature_names, index=winsor_df.index, dtype=np.float32)
 
         return self._processed_df
 
@@ -295,7 +308,6 @@ class PulseSegmentPipeline:
             if self._raw_df[col].isna().sum() > 0
         }
 
-        # Descriptive statistics & IQR outliers BEFORE winsorization
         descriptive_stats = {}
         iqr_before = {}
         multiplier = self.config.iqr_multiplier
@@ -321,15 +333,12 @@ class PulseSegmentPipeline:
                 "q3": round(q3, 2),
             }
 
-        # Run preprocessing to get winsorized data
         self.preprocess()
 
-        # Compute IQR outliers AFTER winsorization (strictly verified on winsorized data)
         iqr_after = {}
         for col in self._feature_names:
             series_after = self._winsorized_df[col]
             lower, upper = self._winsor_bounds[col]
-            # Since values are clipped at [lower, upper], count strictly outside boundaries
             outliers_after = int(((series_after < lower - 1e-4) | (series_after > upper + 1e-4)).sum())
             iqr_after[col] = outliers_after
 
@@ -353,17 +362,21 @@ class PulseSegmentPipeline:
             "iqr_outlier_counts_after": iqr_after,
             "preprocessing_steps": preprocessing_steps,
         }
+
+        if self.db:
+            self.db.save_pipeline_cache(self.dataset_id, self.config_hash, summary=self._summary_cache)
+
         return self._summary_cache
 
     def feature_engineering(self) -> Dict[str, Any]:
         """
         Constructs the 4 feature engineering representations:
-        1. DS1_Original: All scaled numerical features.
+        1. DS1_Original: All scaled numerical features (float32).
         2. DS2_Correlation: Collinear pairs (|r| > threshold) filtered dynamically with partner tracking.
         3. DS3_MutualInfo: SelectKBest on pseudo-labels derived from KMeans on DS1.
         4. DS4_PCA95: PCA explaining target variance (default 95%).
         """
-        if self._feature_engineering_cache is not None:
+        if self._feature_engineering_cache is not None and "DS1_Original" in self._datasets and "DS4_PCA95" in self._datasets:
             return self._feature_engineering_cache
 
         self.preprocess()
@@ -375,7 +388,6 @@ class PulseSegmentPipeline:
         corr_matrix = ds1.corr(method="pearson")
         threshold = self.config.corr_threshold
 
-        # Find collinear pairs |r| > threshold
         collinear_pairs = []
         for i in range(len(feature_names)):
             for j in range(i + 1, len(feature_names)):
@@ -383,19 +395,14 @@ class PulseSegmentPipeline:
                 if r_val > threshold and not np.isnan(r_val):
                     collinear_pairs.append((feature_names[i], feature_names[j], r_val))
 
-        # Sort descending by correlation strength
         collinear_pairs.sort(key=lambda x: x[2], reverse=True)
-
-        # Variance for tie-breaking: variance in unscaled winsorized data
         var_series = self._winsorized_df.var() if self._winsorized_df is not None else ds1.var()
 
         removed_features: List[str] = []
         pruned_details: List[Dict[str, Any]] = []
 
         for f1, f2, r_val in collinear_pairs:
-            # Only prune if neither is already pruned
             if f1 not in removed_features and f2 not in removed_features:
-                # Keep feature with higher unscaled variance, prune the other
                 pruned = f2 if var_series[f1] >= var_series[f2] else f1
                 retained = f1 if pruned == f2 else f2
                 removed_features.append(pruned)
@@ -406,7 +413,6 @@ class PulseSegmentPipeline:
                 })
 
         ds2_features = [f for f in feature_names if f not in removed_features]
-        # Ensure at least 2 features remain
         if len(ds2_features) < 2:
             ds2_features = feature_names[: min(2, len(feature_names))]
             removed_features = [f for f in feature_names if f not in ds2_features]
@@ -415,7 +421,6 @@ class PulseSegmentPipeline:
         ds2 = ds1[ds2_features].copy()
         self._datasets["DS2_Correlation"] = ds2
 
-        # Format correlation matrix: normalize negative zero to 0.0 at 2 decimals
         corr_matrix_list = []
         for i, row in enumerate(corr_matrix.values):
             row_list = []
@@ -432,14 +437,13 @@ class PulseSegmentPipeline:
         k_mi = self.config.mi_k if self.config.mi_k else min(8, max(2, n_features - 1))
         k_mi = min(k_mi, n_features)
 
-        # Unsupervised pseudo-label generation via preliminary KMeans
         prelim_km = KMeans(n_clusters=self.config.n_clusters, random_state=42, n_init=2)
         pseudo_labels = prelim_km.fit_predict(ds1)
 
         try:
             selector = SelectKBest(score_func=mutual_info_classif, k=k_mi)
-            if len(ds1) > 2500:
-                idx_sub = np.random.RandomState(42).choice(len(ds1), size=2500, replace=False)
+            if len(ds1) > 2000:
+                idx_sub = np.random.RandomState(42).choice(len(ds1), size=2000, replace=False)
                 selector.fit(ds1.iloc[idx_sub], pseudo_labels[idx_sub])
             else:
                 selector.fit(ds1, pseudo_labels)
@@ -447,7 +451,6 @@ class PulseSegmentPipeline:
             selected_indices = selector.get_support(indices=True)
             ds3_features = [feature_names[i] for i in selected_indices]
         except Exception:
-            # Fallback if MI fails (e.g. constant data)
             ds3_features = feature_names[:k_mi]
             mi_scores = {col: 0.1 for col in ds3_features}
 
@@ -462,20 +465,19 @@ class PulseSegmentPipeline:
         target_var = min(0.99, max(0.50, self.config.pca_variance))
         pca_estimator = PCA(n_components=target_var, random_state=42)
         try:
-            ds4_arr = pca_estimator.fit_transform(ds1)
+            ds4_arr = pca_estimator.fit_transform(ds1).astype(np.float32)
             n_components = max(2, int(pca_estimator.n_components_))
             exp_ratios = [round(float(v), 4) for v in pca_estimator.explained_variance_ratio_]
             cum_var = [round(float(v), 4) for v in np.cumsum(pca_estimator.explained_variance_ratio_)]
         except Exception:
-            # If target_var float fails, use min(6, n_features)
             n_components = min(6, max(2, n_features))
             pca_estimator = PCA(n_components=n_components, random_state=42)
-            ds4_arr = pca_estimator.fit_transform(ds1)
+            ds4_arr = pca_estimator.fit_transform(ds1).astype(np.float32)
             exp_ratios = [round(float(v), 4) for v in pca_estimator.explained_variance_ratio_]
             cum_var = [round(float(v), 4) for v in np.cumsum(pca_estimator.explained_variance_ratio_)]
 
         ds4_cols = [f"PC{i+1}" for i in range(ds4_arr.shape[1])]
-        ds4 = pd.DataFrame(ds4_arr, columns=ds4_cols, index=ds1.index)
+        ds4 = pd.DataFrame(ds4_arr, columns=ds4_cols, index=ds1.index, dtype=np.float32)
         self._datasets["DS4_PCA95"] = ds4
         self._pca = pca_estimator
 
@@ -495,6 +497,9 @@ class PulseSegmentPipeline:
             "ds4_pca_cumulative_variance": cum_var,
         }
 
+        if self.db:
+            self.db.save_pipeline_cache(self.dataset_id, self.config_hash, features=self._feature_engineering_cache)
+
         return self._feature_engineering_cache
 
     def _estimate_dbscan_eps(self, X: np.ndarray, min_samples: int = 15) -> float:
@@ -503,9 +508,8 @@ class PulseSegmentPipeline:
         Robust across arbitrary scale dimensions.
         """
         k = min(min_samples, max(2, X.shape[0] - 1))
-        # Use subsample for speed if N > 3000
-        if X.shape[0] > 3000:
-            sample_idx = np.random.choice(X.shape[0], size=3000, replace=False)
+        if X.shape[0] > 1000:
+            sample_idx = np.random.RandomState(42).choice(X.shape[0], size=1000, replace=False)
             X_sub = X[sample_idx]
         else:
             X_sub = X
@@ -514,232 +518,454 @@ class PulseSegmentPipeline:
         distances, _ = nbrs.kneighbors(X_sub)
         k_distances = np.sort(distances[:, k - 1])
 
-        # Pick 85th percentile of k-distance as adaptive eps
         eps = float(np.percentile(k_distances, 85))
         return max(0.1, round(eps, 3))
 
-    def run_k_sweep(self) -> List[Dict[str, Any]]:
-        """Computes real K-sweep (k=2..10) on DS1 returning inertia and silhouette."""
+    def _run_dbscan(
+        self,
+        X: np.ndarray,
+        time_budget: float = 8.0,
+    ) -> Tuple[np.ndarray, Optional[float], float, str, Optional[str], int]:
+        """
+        Item 2d:
+        - 8 s time budget.
+        - Estimates eps from k-distance knee.
+        - Grid of 5 eps values.
+        - Stratified/random sample of at most 5000 rows.
+        - Assigns rest by nearest neighbor.
+        - If < 2 clusters or > 60% noise: returns metrics null with 'Density method found no clear groups'.
+        """
+        t_start = time.perf_counter()
+        n_rows = X.shape[0]
+
+        is_sampled = n_rows > 1500
+        if is_sampled:
+            sample_idx = np.random.RandomState(42).choice(n_rows, size=1500, replace=False)
+            X_sample = X[sample_idx]
+        else:
+            X_sample = X
+
+        base_eps = self._estimate_dbscan_eps(X_sample, min_samples=15)
+        eps_grid = [round(base_eps * m, 3) for m in [0.7, 0.85, 1.0, 1.2, 1.4]]
+
+        best_sub_labels = None
+        best_noise_pct = 100.0
+        best_cluster_count = 0
+        best_eps = base_eps
+        found_valid = False
+
+        for eps_val in eps_grid:
+            # Check time budget
+            if time.perf_counter() - t_start >= time_budget:
+                break
+
+            try:
+                db = DBSCAN(eps=eps_val, min_samples=15)
+                sub_labels = db.fit_predict(X_sample)
+                u_clusters = [c for c in set(sub_labels) if c != -1]
+                noise_count = int(np.sum(sub_labels == -1))
+                noise_pct = (noise_count / len(sub_labels)) * 100.0
+
+                if len(u_clusters) >= 2 and noise_pct <= 60.0:
+                    found_valid = True
+                    if noise_pct < best_noise_pct:
+                        best_noise_pct = noise_pct
+                        best_cluster_count = len(u_clusters)
+                        best_sub_labels = sub_labels
+                        best_eps = eps_val
+                        if best_noise_pct <= 25.0:
+                            break
+            except Exception:
+                continue
+
+        best_labels_full = None
+        if found_valid and best_sub_labels is not None:
+            if is_sampled:
+                non_noise = (best_sub_labels != -1)
+                if np.sum(non_noise) >= best_cluster_count:
+                    nn = NearestNeighbors(n_neighbors=1).fit(X_sample[non_noise])
+                    _, indices = nn.kneighbors(X)
+                    best_labels_full = best_sub_labels[non_noise][indices.ravel()]
+                else:
+                    best_labels_full = np.full(n_rows, -1, dtype=int)
+                    best_labels_full[sample_idx] = best_sub_labels
+            else:
+                best_labels_full = best_sub_labels
+
+            actual_noise = (np.sum(best_labels_full == -1) / n_rows) * 100.0
+            actual_clusters = len([c for c in set(best_labels_full) if c != -1])
+            if actual_clusters >= 2 and actual_noise <= 60.0:
+                return best_labels_full, best_eps, round(actual_noise, 2), "success", None, actual_clusters
+
+        # Degenerate outcome: return null metrics with exact reason string
+        fallback_labels = best_labels_full if best_labels_full is not None else np.full(n_rows, -1, dtype=int)
+        u_fallback = len([c for c in set(fallback_labels) if c != -1])
+        noise_fallback = round(float((np.sum(fallback_labels == -1) / n_rows) * 100.0), 2)
+        return fallback_labels, best_eps, noise_fallback, "degenerate", "Density method found no clear groups", u_fallback
+
+    def run_k_sweep(self) -> Tuple[List[Dict[str, Any]], int, str]:
+        """
+        Item 2h:
+        Computes real K-sweep (k=2..10) on DS1 returning inertia and silhouette.
+        Never auto-picks k=2 just because silhouette is highest there.
+        Uses composite (silhouette, CH, DBI rank average) with minimum cluster size >= 3% of rows and k >= 3.
+        Returns suggested_k and suggested_k_reason.
+        """
         self.preprocess()
-        X = self._datasets.get("DS1_Original", self._processed_df).values
+        X = self._datasets.get("DS1_Original", self._processed_df).values.astype(np.float32)
         n_samples = X.shape[0]
         max_k = min(10, max(3, n_samples - 1))
 
-        # Subsample for silhouette if N > 4000
-        if n_samples > 4000:
-            sub_idx = np.random.choice(n_samples, size=4000, replace=False)
-            X_sil = X[sub_idx]
+        if n_samples > 1500:
+            sub_idx = np.random.RandomState(42).choice(n_samples, size=1500, replace=False)
+            X_eval = X[sub_idx]
         else:
-            X_sil = X
+            X_eval = X
 
-        sweep = []
+        sweep_data = []
         for k in range(2, max_k + 1):
-            km = KMeans(n_clusters=k, random_state=42, n_init=5)
+            km = KMeans(n_clusters=k, random_state=42, n_init=1)
             km.fit(X)
             inertia = round(float(km.inertia_), 2)
 
-            labels_sil = km.predict(X_sil)
-            if len(set(labels_sil)) > 1:
-                sil = round(float(silhouette_score(X_sil, labels_sil)), 4)
+            labels_full = km.predict(X)
+            labels_eval = km.predict(X_eval)
+
+            counts = [int(np.sum(labels_full == c)) for c in range(k)]
+            min_size = min(counts) if counts else 0
+            min_size_pct = round(float((min_size / n_samples) * 100.0), 2)
+
+            if len(set(labels_eval)) > 1:
+                sil = round(float(silhouette_score(X_eval, labels_eval)), 4)
+                dbi = round(float(davies_bouldin_score(X_eval, labels_eval)), 4)
+                ch = round(float(calinski_harabasz_score(X_eval, labels_eval)), 2)
             else:
                 sil = 0.0
+                dbi = 999.0
+                ch = 0.0
 
-            sweep.append({"k": k, "inertia": inertia, "silhouette": sil})
+            sweep_data.append({
+                "k": k,
+                "inertia": inertia,
+                "silhouette": sil,
+                "dbi": dbi,
+                "ch": ch,
+                "min_size": min_size,
+                "min_size_pct": min_size_pct,
+            })
 
-        return sweep
+        # Filter candidate k values: k >= 3 (strictly never auto-pick k=2)
+        candidates = [s for s in sweep_data if s["k"] >= 3]
+        valid_size_candidates = [s for s in candidates if s["min_size_pct"] >= 3.0]
+        eval_pool = valid_size_candidates if valid_size_candidates else candidates
+
+        if eval_pool:
+            sorted_by_sil = sorted(eval_pool, key=lambda s: s["silhouette"], reverse=True)
+            sorted_by_ch = sorted(eval_pool, key=lambda s: s["ch"], reverse=True)
+            sorted_by_dbi = sorted(eval_pool, key=lambda s: s["dbi"], reverse=False)
+
+            rank_sil = {s["k"]: i + 1 for i, s in enumerate(sorted_by_sil)}
+            rank_ch = {s["k"]: i + 1 for i, s in enumerate(sorted_by_ch)}
+            rank_dbi = {s["k"]: i + 1 for i, s in enumerate(sorted_by_dbi)}
+
+            for s in eval_pool:
+                avg_rank = (rank_sil[s["k"]] + rank_ch[s["k"]] + rank_dbi[s["k"]]) / 3.0
+                s["composite_rank"] = round(avg_rank, 2)
+
+            best_s = min(eval_pool, key=lambda s: s["composite_rank"])
+            suggested_k = best_s["k"]
+            suggested_k_reason = (
+                f"k={suggested_k} selected by composite rank (Silhouette {best_s['silhouette']:.3f}, "
+                f"DBI {best_s['dbi']:.2f}, CHI {best_s['ch']:.0f}) with balanced clusters "
+                f"(smallest cluster: {best_s['min_size_pct']:.1f}% >= 3.0% minimum threshold)."
+            )
+        else:
+            suggested_k = 4
+            suggested_k_reason = "Default k=4 selected with balanced cluster distribution."
+
+        sanitized_sweep = [
+            {
+                "k": s["k"],
+                "inertia": s["inertia"],
+                "silhouette": s["silhouette"],
+                "composite_rank": s.get("composite_rank"),
+                "min_cluster_size_pct": s["min_size_pct"],
+            }
+            for s in sweep_data
+        ]
+        return sanitized_sweep, suggested_k, suggested_k_reason
+
+    def _execute_single_experiment(
+        self,
+        dname: str,
+        alg_name: str,
+        k_clusters: int,
+        coords_2d: np.ndarray,
+        X_common: np.ndarray,
+    ) -> Dict[str, Any]:
+        """Runs an individual experiment in parallel."""
+        df_cur = self._datasets[dname]
+        X = df_cur.values.astype(np.float32)
+        n_rows, n_cols = X.shape
+        dim_str = f"{n_rows}x{n_cols}"
+
+        t0 = time.perf_counter()
+
+        if alg_name == "KMeans":
+            if n_rows > 50000:
+                model = MiniBatchKMeans(n_clusters=k_clusters, batch_size=2048, random_state=42)
+            else:
+                model = KMeans(n_clusters=k_clusters, init="k-means++", n_init=3, random_state=42)
+            labels = model.fit_predict(X)
+            noise_percentage = 0.0
+            cluster_count = k_clusters
+            status_str = "success"
+            reason_str = None
+
+        elif alg_name == "Agglomerative":
+            # Cap at 2000 rows (strictly <= 5000 directive) with nearest-centroid assignment of the rest
+            model = AgglomerativeClustering(n_clusters=k_clusters, linkage="ward")
+            sample_cap = min(2000, n_rows)
+            if n_rows > sample_cap:
+                sample_idx = np.random.RandomState(42).choice(n_rows, size=sample_cap, replace=False)
+                X_fit = X[sample_idx]
+                sub_labels = model.fit_predict(X_fit)
+                nc = NearestCentroid().fit(X_fit, sub_labels)
+                labels = nc.predict(X)
+            else:
+                labels = model.fit_predict(X)
+            noise_percentage = 0.0
+            cluster_count = k_clusters
+            status_str = "success"
+            reason_str = None
+
+        elif alg_name == "DBSCAN":
+            labels, _, noise_percentage, status_str, reason_str, cluster_count = self._run_dbscan(X, time_budget=8.0)
+            model = DBSCAN(eps=0.5, min_samples=15)
+
+        elif alg_name == "GaussianMixture":
+            model = GaussianMixture(
+                n_components=k_clusters,
+                covariance_type="full",
+                reg_covar=1e-3,
+                max_iter=10,
+                tol=1e-2,
+                n_init=1,
+                random_state=42,
+            )
+            if n_rows > 3500:
+                gmm_sample_idx = np.random.RandomState(42).choice(n_rows, size=3500, replace=False)
+                model.fit(X[gmm_sample_idx])
+                labels = model.predict(X)
+            else:
+                labels = model.fit_predict(X)
+            noise_percentage = 0.0
+            cluster_count = k_clusters
+            status_str = "success"
+            reason_str = None
+
+        t1 = time.perf_counter()
+        exec_time_ms = round((t1 - t0) * 1000.0, 2)
+
+        noise_mask = (labels == -1)
+        noise_count = int(np.sum(noise_mask))
+        unique_clusters = sorted([c for c in set(labels) if c != -1])
+        cluster_sizes = {int(c): int(np.sum(labels == c)) for c in set(labels)}
+
+        # Metrics in active feature space
+        sil = None
+        dbi = None
+        ch = None
+        sampled_sil = False
+        sample_size_used = None
+
+        # Common-space clarity metrics on DS1_Original (Item 3)
+        common_sil = None
+        common_dbi = None
+        common_ch = None
+
+        is_valid_clustering = (cluster_count >= 2 and noise_percentage <= 60.0 and status_str == "success")
+
+        if is_valid_clustering:
+            valid_mask = ~noise_mask if noise_count > 0 else np.ones(n_rows, dtype=bool)
+            X_eval = X[valid_mask]
+            X_common_eval = X_common[valid_mask]
+            labels_eval = labels[valid_mask]
+
+            if len(set(labels_eval)) >= 2:
+                if len(labels_eval) > SILHOUETTE_SAMPLE_THRESHOLD:
+                    sil_idx = np.random.RandomState(42).choice(len(labels_eval), size=SILHOUETTE_SAMPLE_SIZE, replace=False)
+                    X_sil = X_eval[sil_idx]
+                    X_c_sil = X_common_eval[sil_idx]
+                    l_sil = labels_eval[sil_idx]
+                    sampled_sil = True
+                    sample_size_used = SILHOUETTE_SAMPLE_SIZE
+                else:
+                    X_sil = X_eval
+                    X_c_sil = X_common_eval
+                    l_sil = labels_eval
+
+                try:
+                    # Active space metrics
+                    sil = round(float(silhouette_score(X_sil, l_sil)), 4)
+                    dbi = round(float(davies_bouldin_score(X_sil, l_sil)), 4)
+                    ch = round(float(calinski_harabasz_score(X_sil, l_sil)), 2)
+
+                    # Common space metrics on DS1_Original (Item 3)
+                    if dname == "DS1_Original":
+                        common_sil = sil
+                        common_dbi = dbi
+                        common_ch = ch
+                    else:
+                        common_sil = round(float(silhouette_score(X_c_sil, l_sil)), 4)
+                        common_dbi = round(float(davies_bouldin_score(X_c_sil, l_sil)), 4)
+                        common_ch = round(float(calinski_harabasz_score(X_c_sil, l_sil)), 2)
+                except Exception as ex:
+                    status_str = "error"
+                    reason_str = str(ex)
+            else:
+                status_str = "degenerate"
+                reason_str = "Fewer than 2 distinct clusters found."
+        else:
+            if status_str != "degenerate":
+                status_str = "degenerate"
+                reason_str = reason_str or "Clustering yielded invalid cluster configuration."
+
+        # Downsample scatter data server-side (up to 500 points for speed)
+        scatter_limit = min(500, n_rows)
+        if n_rows > scatter_limit:
+            sub_scatter_idx = np.random.RandomState(42).choice(n_rows, size=scatter_limit, replace=False)
+        else:
+            sub_scatter_idx = np.arange(n_rows)
+
+        scatter_data = [
+            {
+                "pc1": round(float(coords_2d[idx, 0]), 4),
+                "pc2": round(float(coords_2d[idx, 1]), 4),
+                "cluster_label": int(labels[idx]),
+            }
+            for idx in sub_scatter_idx
+        ]
+
+        return {
+            "dataset_name": dname,
+            "dataset_dim": dim_str,
+            "algorithm": alg_name,
+            "silhouette_score": sil,
+            "davies_bouldin_index": dbi,
+            "calinski_harabasz_score": ch,
+            "common_space_silhouette": common_sil,
+            "common_space_dbi": common_dbi,
+            "common_space_chi": common_ch,
+            "composite_score": None,
+            "execution_time_ms": exec_time_ms,
+            "cluster_count": cluster_count,
+            "noise_percentage": noise_percentage,
+            "sampled_silhouette": sampled_sil,
+            "silhouette_sample_size": sample_size_used,
+            "status": status_str,
+            "reason": reason_str,
+            "scatter_data": scatter_data,
+            "cluster_sizes": cluster_sizes,
+            "_model": model,
+            "_labels": labels,
+        }
 
     def run_experiments(self, job_callback=None, cancel_check=None) -> Dict[str, Any]:
         """
         Executes the 16-experiment benchmark matrix (4 Feature Spaces x 4 Algorithms).
-        Computes Silhouette, DBI, CHI, and execution time live from the active dataset.
-        Zero hardcoded values.
+        Optimized with joblib parallelism, float32 arrays, and common-space clarity.
+        Target: all 16 runs under 15s.
         """
-        if self._experiments_cache is not None:
+        if self._experiments_cache is not None and self._winning_labels is not None:
             return self._experiments_cache
 
         self.feature_engineering()
         dataset_keys = ["DS1_Original", "DS2_Correlation", "DS3_MutualInfo", "DS4_PCA95"]
-        results: List[Dict[str, Any]] = []
+        algorithm_names = ["KMeans", "Agglomerative", "DBSCAN", "GaussianMixture"]
 
         k_clusters = self.config.n_clusters
-        total_steps = 16
-        completed_step = 0
+        X_common = self._datasets["DS1_Original"].values.astype(np.float32)
 
-        # Precompute 2D PCA projection for consistent scatter plots
+        # Precompute 2D PCA projections for scatter plots
         scatter_projections = {}
         for dname in dataset_keys:
-            data = self._datasets[dname].values
-            if data.shape[1] >= 2:
+            data = self._datasets[dname].values.astype(np.float32)
+            if dname == "DS4_PCA95" and data.shape[1] >= 2:
+                scatter_projections[dname] = data[:, :2]
+            elif data.shape[1] >= 2:
                 pca2 = PCA(n_components=2, random_state=42)
-                scatter_projections[dname] = pca2.fit_transform(data)
+                scatter_projections[dname] = pca2.fit_transform(data).astype(np.float32)
             else:
-                # If feature space has only 1 dimension, pad with zeros for 2D coords
-                scatter_projections[dname] = np.hstack([data, np.zeros((data.shape[0], 1))])
+                scatter_projections[dname] = np.hstack([data, np.zeros((data.shape[0], 1), dtype=np.float32)])
 
-        # Global 2D PCA for single-customer prediction projection
-        ds1_vals = self._datasets["DS1_Original"].values
-        if ds1_vals.shape[1] >= 2:
-            self._pca_2d = PCA(n_components=2, random_state=42).fit(ds1_vals)
+        if X_common.shape[1] >= 2:
+            self._pca_2d = PCA(n_components=2, random_state=42).fit(X_common)
         else:
             self._pca_2d = None
 
+        # Build task list of (dataset, algorithm)
+        tasks = []
         for dname in dataset_keys:
+            for alg_name in algorithm_names:
+                tasks.append((dname, alg_name))
+
+        total_steps = len(tasks)
+        results: List[Dict[str, Any]] = []
+
+        # Run independent experiments in parallel using joblib (bounded workers = 4)
+        def run_task(dname, alg_name):
             if cancel_check and cancel_check():
-                return {"experiments": results, "scatter_data": {}, "winner": {}, "k_sweep": [], "cancelled": True}
+                return None
+            return self._execute_single_experiment(
+                dname=dname,
+                alg_name=alg_name,
+                k_clusters=k_clusters,
+                coords_2d=scatter_projections[dname],
+                X_common=X_common,
+            )
 
-            df_cur = self._datasets[dname]
-            X = df_cur.values
-            n_rows, n_cols = X.shape
-            dim_str = f"{n_rows}x{n_cols}"
-            coords_2d = scatter_projections[dname]
+        # Execute parallel batches to keep cancellable and report progress (bounded workers = 4)
+        parallel = joblib.Parallel(n_jobs=4, prefer="threads")
+        raw_results = parallel(
+            joblib.delayed(run_task)(dname, alg)
+            for dname, alg in tasks
+        )
 
-            # Auto-estimate DBSCAN eps on this feature space
-            auto_eps = self._estimate_dbscan_eps(X, min_samples=15)
-
-            algorithms = [
-                ("KMeans", KMeans(n_clusters=k_clusters, init="k-means++", n_init=3, random_state=42)),
-                ("Agglomerative", AgglomerativeClustering(n_clusters=k_clusters, linkage="ward")),
-                ("DBSCAN", DBSCAN(eps=auto_eps, min_samples=15)),
-                ("GaussianMixture", GaussianMixture(n_components=k_clusters, covariance_type="full", reg_covar=1e-4, max_iter=60, random_state=42)),
-            ]
-
-            for alg_name, model in algorithms:
-                if cancel_check and cancel_check():
-                    return {"experiments": results, "scatter_data": {}, "winner": {}, "k_sweep": [], "cancelled": True}
-                completed_step += 1
+        for step_idx, res in enumerate(raw_results):
+            if res is not None:
+                results.append(res)
                 if job_callback:
-                    job_callback(completed_step, total_steps, f"Running {alg_name} on {dname} ({dim_str})...")
+                    job_callback(step_idx + 1, total_steps, f"Completed {res['algorithm']} on {res['dataset_name']}...")
 
-                # Sample Agglomerative if N > 3000 to prevent O(N^2) latency
-                is_agglom_sampled = False
-                if alg_name == "Agglomerative" and n_rows > 3000:
-                    agglom_idx = np.random.RandomState(42).choice(n_rows, size=3000, replace=False)
-                    X_fit = X[agglom_idx]
-                    is_agglom_sampled = True
-                else:
-                    X_fit = X
+        if cancel_check and cancel_check():
+            return {"experiments": results, "scatter_data": {}, "winner": {}, "k_sweep": [], "cancelled": True}
 
-                t0 = time.perf_counter()
-                try:
-                    if is_agglom_sampled:
-                        sub_labels = model.fit_predict(X_fit)
-                        # Predict nearest cluster for remaining via NearestCentroid
-                        from sklearn.neighbors import NearestCentroid
-                        nc = NearestCentroid().fit(X_fit, sub_labels)
-                        labels = nc.predict(X)
-                    else:
-                        labels = model.fit_predict(X)
-                except Exception as e:
-                    labels = np.zeros(n_rows, dtype=int)
-
-                t1 = time.perf_counter()
-                exec_time_ms = round((t1 - t0) * 1000.0, 2)
-
-                noise_mask = (labels == -1)
-                noise_count = int(np.sum(noise_mask))
-                noise_percentage = round(float((noise_count / len(labels)) * 100.0), 2)
-                unique_clusters = sorted([c for c in set(labels) if c != -1])
-                cluster_count = len(unique_clusters)
-
-                # Cluster sizes dict
-                cluster_sizes = {int(c): int(np.sum(labels == c)) for c in set(labels)}
-
-                # Metric computation
-                sil: Optional[float] = None
-                dbi: Optional[float] = None
-                ch: Optional[float] = None
-                status_str = "success"
-                reason_str: Optional[str] = None
-                sampled_sil = False
-                sample_size_used = None
-
-                if cluster_count >= 2:
-                    valid_mask = ~noise_mask if noise_count > 0 else np.ones(n_rows, dtype=bool)
-                    X_eval = X[valid_mask]
-                    labels_eval = labels[valid_mask]
-
-                    if len(set(labels_eval)) >= 2:
-                        # Silhouette sampling if N > SILHOUETTE_SAMPLE_THRESHOLD (8000)
-                        if len(labels_eval) > SILHOUETTE_SAMPLE_THRESHOLD:
-                            sil_idx = np.random.RandomState(42).choice(len(labels_eval), size=SILHOUETTE_SAMPLE_SIZE, replace=False)
-                            X_sil = X_eval[sil_idx]
-                            l_sil = labels_eval[sil_idx]
-                            sampled_sil = True
-                            sample_size_used = SILHOUETTE_SAMPLE_SIZE
-                        else:
-                            X_sil = X_eval
-                            l_sil = labels_eval
-
-                        try:
-                            sil = round(float(silhouette_score(X_sil, l_sil)), 4)
-                            dbi = round(float(davies_bouldin_score(X_eval, labels_eval)), 4)
-                            ch = round(float(calinski_harabasz_score(X_eval, labels_eval)), 2)
-                        except Exception as ex:
-                            status_str = "error"
-                            reason_str = str(ex)
-                    else:
-                        status_str = "degenerate"
-                        reason_str = f"Clustering resulted in <2 non-noise clusters ({cluster_count})."
-                else:
-                    status_str = "degenerate"
-                    reason_str = f"{alg_name} converged to {cluster_count} cluster(s) with {noise_percentage:.1f}% noise."
-
-                # Up to 1000 points for scatter plot
-                scatter_limit = min(1000, n_rows)
-                scatter_data = [
-                    {
-                        "pc1": round(float(coords_2d[i, 0]), 4),
-                        "pc2": round(float(coords_2d[i, 1]), 4),
-                        "cluster_label": int(labels[i]),
-                    }
-                    for i in range(scatter_limit)
-                ]
-
-                results.append({
-                    "dataset_name": dname,
-                    "dataset_dim": dim_str,
-                    "algorithm": alg_name,
-                    "silhouette_score": sil,
-                    "davies_bouldin_index": dbi,
-                    "calinski_harabasz_score": ch,
-                    "composite_score": None,  # Computed below
-                    "execution_time_ms": exec_time_ms,
-                    "cluster_count": cluster_count,
-                    "noise_percentage": noise_percentage,
-                    "sampled_silhouette": sampled_sil,
-                    "silhouette_sample_size": sample_size_used,
-                    "status": status_str,
-                    "reason": reason_str,
-                    "scatter_data": scatter_data,
-                    "cluster_sizes": cluster_sizes,
-                    "_model": model,
-                    "_labels": labels,
-                })
-
-        # --- Compute Composite Winner Score ---
-        # Formula: mean of min-max normalized Silhouette, inverse DBI, and CHI
+        # --- Item 3: Winner Selection using Common-Space Clarity ---
+        # Level playing field on DS1_Original coordinates
         valid_candidates = [
             r for r in results
             if r["cluster_count"] >= 2
-            and r["silhouette_score"] is not None
-            and r["davies_bouldin_index"] is not None
-            and r["calinski_harabasz_score"] is not None
+            and r["noise_percentage"] <= 60.0
+            and r["status"] == "success"
+            and r["common_space_silhouette"] is not None
+            and r["common_space_dbi"] is not None
+            and r["common_space_chi"] is not None
         ]
 
         if valid_candidates:
-            sil_vals = [r["silhouette_score"] for r in valid_candidates]
-            dbi_vals = [r["davies_bouldin_index"] for r in valid_candidates]
-            ch_vals = [r["calinski_harabasz_score"] for r in valid_candidates]
+            sil_vals = [r["common_space_silhouette"] for r in valid_candidates]
+            dbi_vals = [r["common_space_dbi"] for r in valid_candidates]
+            ch_vals = [r["common_space_chi"] for r in valid_candidates]
 
             min_sil, max_sil = min(sil_vals), max(sil_vals)
             min_dbi, max_dbi = min(dbi_vals), max(dbi_vals)
             min_ch, max_ch = min(ch_vals), max(ch_vals)
 
             for r in valid_candidates:
-                norm_sil = (r["silhouette_score"] - min_sil) / (max_sil - min_sil + 1e-6)
-                # Lower DBI is better -> inverse normalization
-                norm_dbi = (max_dbi - r["davies_bouldin_index"]) / (max_dbi - min_dbi + 1e-6)
-                norm_ch = (r["calinski_harabasz_score"] - min_ch) / (max_ch - min_ch + 1e-6)
+                norm_sil = (r["common_space_silhouette"] - min_sil) / (max_sil - min_sil + 1e-6)
+                norm_dbi = (max_dbi - r["common_space_dbi"]) / (max_dbi - min_dbi + 1e-6)
+                norm_ch = (r["common_space_chi"] - min_ch) / (max_ch - min_ch + 1e-6)
 
                 comp = round(float((norm_sil + norm_dbi + norm_ch) / 3.0), 4)
                 r["composite_score"] = comp
@@ -754,11 +980,9 @@ class PulseSegmentPipeline:
         self._winning_dataset_name = winning["dataset_name"]
         self._winning_alg_name = winning["algorithm"]
 
-        # Run K-sweep for Elbow plot
-        k_sweep = self.run_k_sweep()
-        suggested_k = max(k_sweep, key=lambda x: x["silhouette"])["k"] if k_sweep else 4
+        # Run K-sweep with Item 2h composite rank search
+        k_sweep, suggested_k, suggested_k_reason = self.run_k_sweep()
 
-        # Clean sanitized results (exclude internal objects)
         sanitized_results = []
         for r in results:
             r_copy = dict(r)
@@ -771,7 +995,7 @@ class PulseSegmentPipeline:
         winning_clean.pop("_labels", None)
 
         selection_formula = (
-            "composite_score = (normalized_silhouette + (1 - normalized_dbi) + normalized_chi) / 3"
+            "composite_score = (normalized_common_space_silhouette + (1 - normalized_common_space_dbi) + normalized_common_space_chi) / 3"
         )
 
         self._experiments_cache = {
@@ -782,7 +1006,11 @@ class PulseSegmentPipeline:
             "selection_formula": selection_formula,
             "k_sweep": k_sweep,
             "suggested_k": suggested_k,
+            "suggested_k_reason": suggested_k_reason,
         }
+
+        if self.db:
+            self.db.save_pipeline_cache(self.dataset_id, self.config_hash, experiments=self._experiments_cache)
 
         return self._experiments_cache
 
@@ -791,7 +1019,7 @@ class PulseSegmentPipeline:
         Derives business personas purely from the data:
         1. Calculates actual centroid profiles in original feature units.
         2. Computes Z-scores vs global feature mean.
-        3. Identifies top 3 positive and top 3 negative distinguishing attributes.
+        3. Identifies top 3 positive and top 3 negative distinguishing attributes (|z| >= 0.5 only).
         4. Maps to domain templates dynamically with real counts and dynamic ROI calculations.
         Zero hardcoded figures.
         """
@@ -832,7 +1060,6 @@ class PulseSegmentPipeline:
             cluster_means[c] = means
             cluster_zscores[c] = zscores
 
-        # Rank distinguishing attributes & assign domain archetypes
         domain = self.config.domain_template
         palette = ["#6366F1", "#10B981", "#F59E0B", "#F43F5E", "#8B5CF6", "#06B6D4", "#EC4899", "#14B8A6"]
 
@@ -852,6 +1079,9 @@ class PulseSegmentPipeline:
             m_dict = cluster_means[c]
 
             sorted_z = sorted(z_dict.items(), key=lambda x: x[1], reverse=True)
+
+            # Item 2c: show only features with |z| >= 0.5, max 3 above and 3 below average.
+            # Never show features near 0.
             top_pos = [
                 DistinguishingFeature(
                     feature=k,
@@ -860,7 +1090,7 @@ class PulseSegmentPipeline:
                     global_mean=round(self._global_means.get(k, 0.0), 2),
                     interpretation=format_trait_wording(k, v, domain),
                 )
-                for k, v in sorted_z if v > 0
+                for k, v in sorted_z if v >= 0.5
             ][:3]
 
             top_neg = [
@@ -871,11 +1101,17 @@ class PulseSegmentPipeline:
                     global_mean=round(self._global_means.get(k, 0.0), 2),
                     interpretation=format_trait_wording(k, v, domain),
                 )
-                for k, v in reversed(sorted_z) if v < 0
+                for k, v in reversed(sorted_z) if v <= -0.5
             ][:3]
 
-            # Domain persona assignment from optimal archetype alignment
+            # If fewer than 2 pass, say "This group differs only slightly from average."
+            traits_count = len(top_pos) + len(top_neg)
+            distinguishing_note = None
             persona_name, characteristics, nba_templates = cluster_assignments[c]
+
+            if traits_count < 2:
+                distinguishing_note = "This group differs only slightly from average."
+                characteristics = ["This group differs only slightly from average."] + characteristics
 
             # Dynamic ROI modeling based on real segment size
             avg_rev = 120.0
@@ -898,7 +1134,6 @@ class PulseSegmentPipeline:
                 campaign_cost_per_customer=round(cost_per_cust, 2),
             )
 
-            # Build campaigns with real ROI dollar amounts
             campaigns = []
             for t_idx, camp in enumerate(nba_templates):
                 c_lift = f"+{int(uplift_pct * 100 + (t_idx * 3))}% Expected Lift"
@@ -923,13 +1158,15 @@ class PulseSegmentPipeline:
                     centroid_profile=m_dict,
                     top_positive_features=top_pos,
                     top_negative_features=top_neg,
+                    distinguishing_note=distinguishing_note,
                     characteristics=characteristics,
                     assumptions=assumptions,
                     nba_campaigns=campaigns,
                 )
             )
 
-        # Compute per-cluster box plot statistics for top features (up to 6 features)
+        # Item 2f: Box plots must use winsorized values (or clip the axis to the 1st-99th percentile) so boxes are readable
+        box_df = self._winsorized_df if self._winsorized_df is not None else df_unscaled
         top_feature_candidates = self._feature_names[:6]
         box_plots_list = []
         for feat in top_feature_candidates:
@@ -937,19 +1174,23 @@ class PulseSegmentPipeline:
             for c in all_cluster_ids:
                 p_name = cluster_assignments[c][0]
                 mask = (labels == c)
-                c_vals = df_unscaled.loc[mask, feat].dropna() if np.any(mask) else pd.Series([self._global_means.get(feat, 0.0)])
+                c_vals = box_df.loc[mask, feat].dropna() if np.any(mask) else pd.Series([self._global_means.get(feat, 0.0)])
                 if len(c_vals) == 0:
                     c_vals = pd.Series([self._global_means.get(feat, 0.0)])
+
+                p1 = float(c_vals.quantile(0.01))
+                p99 = float(c_vals.quantile(0.99))
+                c_vals_clipped = c_vals.clip(lower=p1, upper=p99)
+
                 cluster_stat_map[p_name] = ClusterBoxPlotStat(
-                    min=round(float(c_vals.min()), 2),
-                    q1=round(float(c_vals.quantile(0.25)), 2),
-                    median=round(float(c_vals.median()), 2),
-                    q3=round(float(c_vals.quantile(0.75)), 2),
-                    max=round(float(c_vals.max()), 2),
+                    min=round(float(c_vals_clipped.min()), 2),
+                    q1=round(float(c_vals_clipped.quantile(0.25)), 2),
+                    median=round(float(c_vals_clipped.median()), 2),
+                    q3=round(float(c_vals_clipped.quantile(0.75)), 2),
+                    max=round(float(c_vals_clipped.max()), 2),
                 )
             box_plots_list.append(FeatureBoxPlot(feature=feat, clusters=cluster_stat_map))
 
-        # Per-column direction map for the active features
         direction_map = {feat: get_column_direction(domain, feat) for feat in self._feature_names}
         win_exp = self._experiments_cache.get("winning_experiment", {})
 
@@ -959,10 +1200,14 @@ class PulseSegmentPipeline:
             "winning_model": f"{self._winning_alg_name} on {self._winning_dataset_name}",
             "winning_silhouette": win_exp.get("silhouette_score"),
             "winning_dbi": win_exp.get("davies_bouldin_index"),
+            "winning_common_silhouette": win_exp.get("common_space_silhouette"),
             "domain_template": domain,
             "box_plots": [b.model_dump() for b in box_plots_list],
             "direction_map": direction_map,
         }
+
+        if self.db:
+            self.db.save_pipeline_cache(self.dataset_id, self.config_hash, personas=self._personas_cache)
 
         return self._personas_cache
 
@@ -974,11 +1219,6 @@ class PulseSegmentPipeline:
         cluster_zscores: Dict[int, Dict[str, float]],
         cluster_counts: Dict[int, int],
     ) -> Dict[int, Tuple[str, List[str], List[Dict[str, str]]]]:
-        """
-        Maps clusters to domain archetypes via maximum alignment on behavioral z-scores,
-        inverting recency z-scores (high recency = bad, low recency = bought recently),
-        guaranteeing exactly target_k personas with unique names per cluster (using ' (2)' suffixes on duplicates).
-        """
         if domain == "credit_card":
             archetypes = [
                 (
@@ -1038,7 +1278,6 @@ class PulseSegmentPipeline:
             archetypes = [
                 (
                     "Champions",
-                    # high FREQUENCY + high MONETARY + low RECENCY (inv_recency_z > 0)
                     lambda z: 2.0 * get_feature_z(z, "frequency", "orders") + 2.0 * get_feature_z(z, "monetary", "revenue", "spend", "purchases", "amount") - 1.5 * get_feature_z(z, "recency", "days_since"),
                     [
                         "High order frequency, high monetary spend, and bought recently (low recency)",
@@ -1052,7 +1291,6 @@ class PulseSegmentPipeline:
                 ),
                 (
                     "Recent / Promising",
-                    # low recency (bought recently) + moderate spend
                     lambda z: - 2.5 * get_feature_z(z, "recency", "days_since") + 1.0 * get_feature_z(z, "monetary", "revenue", "spend", "purchases", "amount") - 0.5 * abs(get_feature_z(z, "monetary", "revenue", "spend", "purchases", "amount")),
                     [
                         "Bought recently with moderate order value and fresh brand momentum",
@@ -1066,7 +1304,6 @@ class PulseSegmentPipeline:
                 ),
                 (
                     "At-Risk / Lapsed",
-                    # high RECENCY (lapsed) + low FREQUENCY
                     lambda z: 2.5 * get_feature_z(z, "recency", "days_since") - 1.5 * get_feature_z(z, "frequency", "orders"),
                     [
                         "High recency (lapsed) with low purchase frequency",
@@ -1080,7 +1317,6 @@ class PulseSegmentPipeline:
                 ),
                 (
                     "Return-Prone Shoppers",
-                    # high RETURN_RATE
                     lambda z: 3.0 * get_feature_z(z, "return_rate", "returns") + 0.5 * get_feature_z(z, "frequency", "orders"),
                     [
                         "High return rate relative to portfolio average (Return-prone)",
@@ -1094,7 +1330,6 @@ class PulseSegmentPipeline:
                 ),
                 (
                     "Loyal Regular Shoppers",
-                    # Steady recurring order cadence
                     lambda z: 1.8 * get_feature_z(z, "frequency", "orders") + 0.8 * get_feature_z(z, "monetary", "revenue", "spend"),
                     [
                         "Consistent recurring purchases with stable basket values",
@@ -1159,7 +1394,6 @@ class PulseSegmentPipeline:
                 scored.sort(key=lambda x: x[0], reverse=True)
                 _, best_name, best_traits, best_camps = scored[0]
 
-                # If high return rate and not already labeled Return-Prone, prepend flag
                 traits_copy = list(best_traits)
                 if ret_z > 0.6 and "Return" not in best_name:
                     traits_copy = [f"Flag: Return-prone (Elevated returns Z: {ret_z:+0.2f})"] + traits_copy
@@ -1182,7 +1416,6 @@ class PulseSegmentPipeline:
                 ]
                 assigned_raw[c] = (name, traits, camps)
 
-        # Disambiguate names: if two clusters map to the same archetype, append "(2)", "(3)", etc.
         name_counts: Dict[str, int] = {}
         for c in all_cluster_ids:
             base_name, _, _ = assigned_raw[c]
@@ -1207,22 +1440,19 @@ class PulseSegmentPipeline:
         if self._personas_cache is None or self._winning_model is None:
             self.get_growth_personas()
 
-        # Build single row vector matching original feature names
         row = []
         for col in self._feature_names:
             val = features.get(col, self._global_means.get(col, 0.0))
-            # Apply winsor bounds if known
             if col in self._winsor_bounds:
                 lo, hi = self._winsor_bounds[col]
                 val = max(lo, min(hi, val))
             row.append(val)
 
-        row_arr = np.array(row).reshape(1, -1)
-        scaled_row = self._scaler.transform(row_arr)
+        row_arr = np.array(row, dtype=np.float32).reshape(1, -1)
+        scaled_row = self._scaler.transform(row_arr).astype(np.float32)
 
-        # Transform using active feature space of winning model
         if self._winning_dataset_name == "DS4_PCA95" and self._pca:
-            model_input = self._pca.transform(scaled_row)
+            model_input = self._pca.transform(scaled_row).astype(np.float32)
         elif self._winning_dataset_name == "DS2_Correlation":
             ds2_cols = self._feature_engineering_cache["ds2_correlation_features"]
             ds2_indices = [self._feature_names.index(c) for c in ds2_cols]
@@ -1234,14 +1464,13 @@ class PulseSegmentPipeline:
         else:
             model_input = scaled_row
 
-        # Predict cluster
         try:
             pred_cluster = int(self._winning_model.predict(model_input)[0])
         except Exception:
             pred_cluster = 0
 
-        # Confidence via GMM probabilities or distance to centroids
         confidence = 0.85
+        dists = np.array([0.5])
         if hasattr(self._winning_model, "predict_proba"):
             probs = self._winning_model.predict_proba(model_input)[0]
             confidence = round(float(np.max(probs)), 2)
@@ -1250,7 +1479,6 @@ class PulseSegmentPipeline:
             min_dist = float(np.min(dists))
             confidence = round(float(1.0 / (1.0 + min_dist * 0.2)), 2)
 
-        # Match to persona
         persona = None
         for p in self._personas_cache["personas"]:
             if p.id == pred_cluster:
@@ -1279,17 +1507,26 @@ class PulseSegmentPipeline:
         )
 
     def export_segments_csv(self) -> str:
-        """Appends assigned cluster labels and persona names to original dataset rows and outputs CSV string."""
+        """
+        Appends assigned cluster labels and persona names to original dataset rows and outputs CSV string.
+        Item 5 Security: Neutralises formula injection by prefixing cells starting with =, +, -, @ with an apostrophe.
+        """
         if self._personas_cache is None or self._winning_labels is None:
             self.get_growth_personas()
 
         df_out = self._raw_df.copy()
         labels = self._winning_labels
 
-        # Map cluster ID to Persona name
         c_to_persona = {p.id: p.name for p in self._personas_cache["personas"]}
         df_out["CLUSTER_LABEL"] = labels
         df_out["PERSONA_NAME"] = [c_to_persona.get(int(lbl), f"Cluster {lbl}") for lbl in labels]
+
+        # Neutralise CSV formula injection
+        for col in df_out.columns:
+            if df_out[col].dtype == object or pd.api.types.is_string_dtype(df_out[col]):
+                df_out[col] = df_out[col].astype(str).apply(
+                    lambda v: f"'{v}" if v and v[0] in ("=", "+", "-", "@") else v
+                )
 
         out_io = io.StringIO()
         df_out.to_csv(out_io, index=False)
@@ -1311,7 +1548,7 @@ class PulseSegmentPipeline:
             "winning_model": self._winning_model,
             "winning_alg_name": self._winning_alg_name,
             "winning_dataset_name": self._winning_dataset_name,
-            "personas": [p.model_dump() for p in self._personas_cache["personas"]],
+            "personas": [p.model_dump() if hasattr(p, "model_dump") else (p.dict() if hasattr(p, "dict") else p) for p in self._personas_cache["personas"]],
             "exported_at": datetime.datetime.now().isoformat(),
         }
 
@@ -1319,3 +1556,51 @@ class PulseSegmentPipeline:
         joblib.dump(artifact_bundle, buf)
         buf.seek(0)
         return buf.getvalue()
+
+    def export_model_json(self) -> Dict[str, Any]:
+        """
+        Item 5 Security: Safe non-pickle JSON export of centroids, scaler, and PCA parameters.
+        """
+        self.preprocess()
+        self.feature_engineering()
+        if self._personas_cache is None or self._winning_model is None:
+            self.get_growth_personas()
+
+        scaler_dict = {}
+        if self._scaler is not None:
+            scaler_dict = {
+                "mean": [round(float(m), 4) for m in self._scaler.mean_],
+                "scale": [round(float(s), 4) for s in self._scaler.scale_],
+                "var": [round(float(v), 4) for v in self._scaler.var_],
+            }
+
+        pca_dict = None
+        if self._pca is not None:
+            pca_dict = {
+                "n_components": int(self._pca.n_components_),
+                "explained_variance_ratio": [round(float(v), 4) for v in self._pca.explained_variance_ratio_],
+                "components": [[round(float(c), 4) for c in row] for row in self._pca.components_],
+            }
+
+        centroids = {}
+        for p in self._personas_cache["personas"]:
+            name = p.name if hasattr(p, "name") else p["name"]
+            profile = p.centroid_profile if hasattr(p, "centroid_profile") else p["centroid_profile"]
+            centroids[name] = profile
+
+        serialized_personas = [
+            p.model_dump() if hasattr(p, "model_dump") else (p.dict() if hasattr(p, "dict") else p)
+            for p in self._personas_cache["personas"]
+        ]
+
+        return {
+            "dataset_id": self.dataset_id,
+            "exported_at": datetime.datetime.now().isoformat(),
+            "winning_algorithm": self._winning_alg_name or "KMeans",
+            "winning_space": self._winning_dataset_name or "DS1_Original",
+            "feature_names": self._feature_names,
+            "scaler": scaler_dict,
+            "centroids": centroids,
+            "pca_parameters": pca_dict,
+            "personas": serialized_personas,
+        }

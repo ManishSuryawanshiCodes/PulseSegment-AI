@@ -6,6 +6,8 @@ export interface DatasetInfo {
   row_count: number
   col_count: number
   is_synthetic: boolean
+  real_file_missing?: boolean
+  real_file_path?: string
   created_at: string
   has_results: boolean
 }
@@ -26,6 +28,8 @@ export interface DatasetProfile {
   row_count: number
   col_count: number
   is_synthetic: boolean
+  real_file_missing?: boolean
+  real_file_path?: string
   columns: ColumnProfile[]
   preview: Record<string, any>[]
 }
@@ -104,6 +108,9 @@ export interface ExperimentResult {
   davies_bouldin_index: number | null
   calinski_harabasz_score: number | null
   composite_score?: number | null
+  common_space_silhouette?: number | null
+  common_space_dbi?: number | null
+  common_space_chi?: number | null
   execution_time_ms: number
   cluster_count: number
   noise_percentage: number
@@ -119,6 +126,10 @@ export interface KSweepPoint {
   k: number
   inertia: number
   silhouette: number | null
+  ch_score?: number | null
+  dbi?: number | null
+  composite_rank?: number | null
+  min_cluster_size_pct?: number | null
 }
 
 export interface ExperimentsMatrix {
@@ -129,6 +140,7 @@ export interface ExperimentsMatrix {
   selection_formula?: string
   k_sweep: KSweepPoint[]
   suggested_k: number
+  suggested_k_reason?: string
 }
 
 export interface DistinguishingFeature {
@@ -164,6 +176,7 @@ export interface PersonaProfile {
   top_positive_features?: DistinguishingFeature[]
   top_negative_features?: DistinguishingFeature[]
   characteristics: string[]
+  distinguishing_note?: string
   assumptions?: PersonaAssumptions
   nba_campaigns: NBACampaign[]
 }
@@ -217,7 +230,7 @@ async function fetchAPI<T>(endpoint: string, options?: RequestInit): Promise<T> 
 }
 
 export const api = {
-  health: () => fetchAPI<{ status: string; datasets_available: number; total_records: number; active_dataset: string }>('/api/health'),
+  health: () => fetchAPI<{ status: string; datasets_available: number; total_records: number; active_dataset: string; is_synthetic?: boolean }>('/api/health'),
 
   // Datasets
   listDatasets: () => fetchAPI<DatasetInfo[]>('/api/datasets'),
@@ -240,6 +253,10 @@ export const api = {
       body: formData,
     })
   },
+  deleteDataset: (datasetId: string) =>
+    fetchAPI<{ status: string; dataset_id: string }>(`/api/datasets/${datasetId}`, {
+      method: 'DELETE',
+    }),
 
   // Jobs
   runBenchmark: (datasetId: string) =>
@@ -268,4 +285,5 @@ export const api = {
 
   exportSegmentsUrl: (datasetId: string) => `${API_BASE}/api/datasets/${datasetId}/export/segments.csv`,
   exportModelUrl: (datasetId: string) => `${API_BASE}/api/datasets/${datasetId}/model.joblib`,
+  exportModelJsonUrl: (datasetId: string) => `${API_BASE}/api/datasets/${datasetId}/model.json`,
 }

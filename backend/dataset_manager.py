@@ -1,12 +1,17 @@
 import os
 import io
 import re
+import time
 import uuid
 import datetime
+import threading
 import pandas as pd
 import numpy as np
 from typing import Dict, List, Any, Tuple, Optional
 from fastapi import HTTPException, UploadFile
+import openpyxl
+
+from database import Database
 from models import (
     DatasetInfo,
     ColumnProfile,
@@ -14,6 +19,19 @@ from models import (
     DatasetConfig,
     ConfigResponse,
 )
+
+# Safe ID regex to prevent directory traversal
+SAFE_ID_REGEX = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def validate_identifier(ident: str, name: str = "ID") -> str:
+    """Strictly validates an identifier to prevent path traversal."""
+    if not ident or not SAFE_ID_REGEX.match(ident) or ".." in ident:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {name} format '{ident}'. Must be alphanumeric with underscores/hyphens and no traversal characters.",
+        )
+    return ident
 
 
 def generate_latent_credit_card_demo() -> pd.DataFrame:
@@ -25,18 +43,10 @@ def generate_latent_credit_card_demo() -> pd.DataFrame:
     np.random.seed(42)
     n = 8950
 
-    # 4 latent behavioral segments with realistic proportions
-    # 1: Everyday Spenders (~38%), 2: Revolving Debtors (~26%), 3: Affluent VIPs (~14%), 4: Inactive/Dormant (~22%)
     segment_probs = [0.384, 0.261, 0.142, 0.213]
     segments = np.random.choice([0, 1, 2, 3], size=n, p=segment_probs)
 
     cust_id = [f"C{10001 + i}" for i in range(n)]
-
-    # Latent factors per segment
-    # Segment 0 (Transactor): Moderate balance, high purchase volume, high full payment rate, zero cash advance
-    # Segment 1 (Revolver): High revolving balance, low full payment, moderate installment, high cash advance
-    # Segment 2 (VIP Spender): Highest credit limit, high oneoff & installments, large payments
-    # Segment 3 (Dormant): Very low activity across all transactions, stagnant low balance
 
     balance = np.zeros(n)
     balance_freq = np.zeros(n)
@@ -59,9 +69,9 @@ def generate_latent_credit_card_demo() -> pd.DataFrame:
     for i in range(n):
         s = segments[i]
         if s == 0:  # Transactor
-            balance[i] = np.random.lognormal(5.8, 0.6)  # ~350 - 700
+            balance[i] = np.random.lognormal(5.8, 0.6)
             balance_freq[i] = np.clip(np.random.beta(8, 2), 0.5, 1.0)
-            purchases[i] = np.random.lognormal(7.2, 0.5)  # ~1300
+            purchases[i] = np.random.lognormal(7.2, 0.5)
             oneoff[i] = purchases[i] * np.random.uniform(0.3, 0.6)
             installments[i] = purchases[i] - oneoff[i]
             cash_adv[i] = 0.0 if np.random.rand() > 0.08 else np.random.lognormal(4.5, 0.5)
@@ -71,31 +81,31 @@ def generate_latent_credit_card_demo() -> pd.DataFrame:
             cash_adv_freq[i] = 0.0 if cash_adv[i] == 0 else np.random.uniform(0.01, 0.08)
             cash_adv_trx[i] = 0 if cash_adv[i] == 0 else np.random.poisson(1)
             purchases_trx[i] = int(purchases_freq[i] * 28 + np.random.poisson(3))
-            credit_limit[i] = np.random.lognormal(8.3, 0.4)  # ~4000
+            credit_limit[i] = np.random.lognormal(8.3, 0.4)
             payments[i] = purchases[i] * np.random.uniform(0.9, 1.3)
             min_payments[i] = balance[i] * 0.05 + np.random.uniform(10, 40)
             prc_full[i] = np.clip(np.random.beta(8, 2), 0.6, 1.0)
         elif s == 1:  # Revolver
-            balance[i] = np.random.lognormal(8.2, 0.5)  # ~3600
+            balance[i] = np.random.lognormal(8.2, 0.5)
             balance_freq[i] = np.clip(np.random.beta(9, 1), 0.8, 1.0)
-            purchases[i] = np.random.lognormal(5.8, 0.6)  # ~330
+            purchases[i] = np.random.lognormal(5.8, 0.6)
             oneoff[i] = purchases[i] * 0.2 if np.random.rand() > 0.4 else 0.0
             installments[i] = purchases[i] - oneoff[i]
-            cash_adv[i] = np.random.lognormal(7.3, 0.6)  # ~1500
+            cash_adv[i] = np.random.lognormal(7.3, 0.6)
             purchases_freq[i] = np.clip(np.random.beta(3, 4), 0.1, 0.6)
             oneoff_freq[i] = 0.0 if oneoff[i] == 0 else purchases_freq[i] * 0.2
             installments_freq[i] = purchases_freq[i] * 0.6
             cash_adv_freq[i] = np.clip(np.random.beta(4, 3), 0.2, 0.7)
             cash_adv_trx[i] = max(1, np.random.poisson(5))
             purchases_trx[i] = int(purchases_freq[i] * 10 + np.random.poisson(2))
-            credit_limit[i] = np.random.lognormal(8.2, 0.4)  # ~3600
-            payments[i] = np.random.lognormal(6.8, 0.5)  # ~900
+            credit_limit[i] = np.random.lognormal(8.2, 0.4)
+            payments[i] = np.random.lognormal(6.8, 0.5)
             min_payments[i] = balance[i] * 0.08 + np.random.uniform(20, 80)
             prc_full[i] = np.clip(np.random.beta(0.5, 9), 0.0, 0.15)
         elif s == 2:  # VIP Spender
-            balance[i] = np.random.lognormal(7.6, 0.6)  # ~2000
+            balance[i] = np.random.lognormal(7.6, 0.6)
             balance_freq[i] = np.clip(np.random.beta(9, 1), 0.85, 1.0)
-            purchases[i] = np.random.lognormal(8.3, 0.5)  # ~4000
+            purchases[i] = np.random.lognormal(8.3, 0.5)
             oneoff[i] = purchases[i] * np.random.uniform(0.6, 0.85)
             installments[i] = purchases[i] - oneoff[i]
             cash_adv[i] = 0.0 if np.random.rand() > 0.35 else np.random.lognormal(6.9, 0.6)
@@ -105,12 +115,12 @@ def generate_latent_credit_card_demo() -> pd.DataFrame:
             cash_adv_freq[i] = 0.0 if cash_adv[i] == 0 else np.random.uniform(0.05, 0.25)
             cash_adv_trx[i] = 0 if cash_adv[i] == 0 else np.random.poisson(2)
             purchases_trx[i] = int(purchases_freq[i] * 40 + np.random.poisson(8))
-            credit_limit[i] = np.random.lognormal(9.3, 0.4)  # ~11000
+            credit_limit[i] = np.random.lognormal(9.3, 0.4)
             payments[i] = purchases[i] * np.random.uniform(0.95, 1.4)
             min_payments[i] = balance[i] * 0.05 + np.random.uniform(20, 50)
             prc_full[i] = np.clip(np.random.beta(5, 3), 0.3, 0.9)
         else:  # Dormant / At-Risk
-            balance[i] = np.random.lognormal(5.0, 0.7)  # ~150 (verified low!)
+            balance[i] = np.random.lognormal(5.0, 0.7)
             balance_freq[i] = np.clip(np.random.beta(4, 5), 0.2, 0.8)
             purchases[i] = 0.0 if np.random.rand() > 0.2 else np.random.lognormal(3.8, 0.6)
             oneoff[i] = purchases[i] if np.random.rand() > 0.5 else 0.0
@@ -122,8 +132,8 @@ def generate_latent_credit_card_demo() -> pd.DataFrame:
             cash_adv_freq[i] = 0.0 if cash_adv[i] == 0 else np.random.uniform(0.01, 0.05)
             cash_adv_trx[i] = 0 if cash_adv[i] == 0 else 1
             purchases_trx[i] = 0 if purchases[i] == 0 else np.random.poisson(1)
-            credit_limit[i] = np.random.lognormal(7.6, 0.4)  # ~2000
-            payments[i] = np.random.lognormal(4.8, 0.6)  # ~120
+            credit_limit[i] = np.random.lognormal(7.6, 0.4)
+            payments[i] = np.random.lognormal(4.8, 0.6)
             min_payments[i] = balance[i] * 0.04 + np.random.uniform(5, 20)
             prc_full[i] = np.clip(np.random.beta(1, 6), 0.0, 0.25)
 
@@ -150,7 +160,6 @@ def generate_latent_credit_card_demo() -> pd.DataFrame:
         }
     )
 
-    # Missing value injection for standard benchmark realism
     nan_credit = np.random.choice(n, size=1, replace=False)
     df.loc[nan_credit, "CREDIT_LIMIT"] = np.nan
 
@@ -166,157 +175,295 @@ class DatasetManager:
         self.uploads_dir = os.path.join(data_dir, "uploads")
         os.makedirs(self.uploads_dir, exist_ok=True)
 
+        # Thread-safety re-entrant lock
+        self._lock = threading.RLock()
+
+        # SQLite Persistence
+        db_path = os.path.join(data_dir, "pulsesegment.db")
+        self.db = Database(db_path)
+
         self._datasets: Dict[str, Dict[str, Any]] = {}
         self._configs: Dict[str, DatasetConfig] = {}
         self._pipeline_instances: Dict[str, Any] = {}
 
+        self._cleanup_old_uploads()
         self._init_builtins()
+
+    def _cleanup_old_uploads(self):
+        """Automatically purges uploaded files older than 7 days."""
+        now = time.time()
+        max_age = 7 * 86400  # 7 days
+        if os.path.exists(self.uploads_dir):
+            for fname in os.listdir(self.uploads_dir):
+                fpath = os.path.join(self.uploads_dir, fname)
+                if os.path.isfile(fpath):
+                    try:
+                        if now - os.path.getmtime(fpath) > max_age:
+                            os.remove(fpath)
+                    except Exception:
+                        pass
 
     def _init_builtins(self):
         """Initialize the built-in Credit Card sample dataset."""
         sample_path = os.path.join(self.data_dir, "cc_general.csv")
+        synthetic_path = os.path.join(self.data_dir, "synthetic_demo.csv")
         sample_id = "sample_credit_card"
 
         is_synthetic = False
+        real_file_missing = True
+        df = None
+
         if os.path.exists(sample_path):
             try:
-                df = pd.read_csv(sample_path)
-            except Exception:
-                df = generate_latent_credit_card_demo()
-                is_synthetic = True
-        else:
-            df = generate_latent_credit_card_demo()
-            is_synthetic = True
-            try:
-                df.to_csv(sample_path, index=False)
+                candidate_df = pd.read_csv(sample_path)
+                # Verify if it's the real Kaggle file:
+                # Real Kaggle file has CUST_ID C10001 with BALANCE ~ 40.90
+                if "CUST_ID" in candidate_df.columns and "BALANCE" in candidate_df.columns:
+                    c1_row = candidate_df.loc[candidate_df["CUST_ID"] == "C10001"]
+                    if not c1_row.empty:
+                        bal = float(c1_row["BALANCE"].values[0])
+                        # The real Kaggle file has BALANCE 40.900749; generated data has 1551.4
+                        if abs(bal - 40.90) < 1.0:
+                            df = candidate_df
+                            is_synthetic = False
+                            real_file_missing = False
             except Exception:
                 pass
 
-        self._datasets[sample_id] = {
-            "id": sample_id,
-            "name": "Credit Card (Sample)",
-            "df": df,
-            "path": sample_path,
-            "is_synthetic": is_synthetic,
-            "created_at": datetime.datetime.now().isoformat(),
-        }
+        if df is None:
+            # Real file is missing or invalid; generate/load demo to synthetic_demo.csv
+            real_file_missing = True
+            is_synthetic = True
+            if os.path.exists(synthetic_path):
+                try:
+                    df = pd.read_csv(synthetic_path)
+                except Exception:
+                    df = None
 
-        # Default configuration
-        self._configs[sample_id] = DatasetConfig(
-            id_column="CUST_ID",
-            include_columns=None,
-            imputation_k=5,
-            iqr_multiplier=1.5,
-            corr_threshold=0.85,
-            mi_k=8,
-            pca_variance=0.95,
-            n_clusters=4,
-            domain_template="credit_card",
-        )
+            if df is None:
+                df = generate_latent_credit_card_demo()
+                try:
+                    # STRICT DIRECTIVE: Write to synthetic_demo.csv, NEVER to cc_general.csv
+                    df.to_csv(synthetic_path, index=False)
+                except Exception:
+                    pass
 
-        # Also register existing uploads if any
-        if os.path.exists(self.uploads_dir):
-            for fname in os.listdir(self.uploads_dir):
-                fpath = os.path.join(self.uploads_dir, fname)
-                if os.path.isfile(fpath) and (fname.endswith(".csv") or fname.endswith(".xlsx") or fname.endswith(".xls")):
-                    parts = fname.split("_")
-                    if fname.startswith("ds_") and len(parts) >= 3:
-                        uid = f"{parts[0]}_{parts[1]}"
-                        display_name = "_".join(parts[2:])
-                    else:
-                        uid = parts[0]
-                        display_name = fname
-                    try:
-                        if fname.endswith(".csv"):
-                            udf = pd.read_csv(fpath)
+        # Startup check logging REAL or SYNTHETIC
+        startup_status = "REAL" if not is_synthetic else "SYNTHETIC"
+        print(f"[STARTUP] Credit card dataset mode: {startup_status}", flush=True)
+
+        display_name = "Credit Card (Real Kaggle)" if not is_synthetic else "Credit Card (Synthetic Demo)"
+        with self._lock:
+            self._datasets[sample_id] = {
+                "id": sample_id,
+                "name": display_name,
+                "df": df,
+                "path": sample_path if not is_synthetic else synthetic_path,
+                "is_synthetic": is_synthetic,
+                "real_file_missing": real_file_missing,
+                "real_file_path": sample_path,
+                "created_at": datetime.datetime.now().isoformat(),
+            }
+
+            # Save in SQLite
+            self.db.save_dataset(
+                dataset_id=sample_id,
+                name=display_name,
+                row_count=int(df.shape[0]),
+                col_count=int(df.shape[1]),
+                is_synthetic=is_synthetic,
+                real_file_missing=real_file_missing,
+                real_file_path=sample_path,
+                path=sample_path if not is_synthetic else synthetic_path,
+                created_at=self._datasets[sample_id]["created_at"],
+            )
+
+            # Check if saved config in DB
+            saved_cfg = self.db.get_config(sample_id)
+            if saved_cfg:
+                self._configs[sample_id] = DatasetConfig(**saved_cfg[0])
+            else:
+                cfg = DatasetConfig(
+                    id_column="CUST_ID",
+                    include_columns=None,
+                    imputation_k=5,
+                    iqr_multiplier=1.5,
+                    corr_threshold=0.85,
+                    mi_k=8,
+                    pca_variance=0.95,
+                    n_clusters=4,
+                    domain_template="credit_card",
+                )
+                self._configs[sample_id] = cfg
+                self.db.save_config(sample_id, cfg.model_dump(), self._compute_config_hash(cfg))
+
+            # Also register existing uploads from directory / SQLite
+            if os.path.exists(self.uploads_dir):
+                for fname in os.listdir(self.uploads_dir):
+                    fpath = os.path.join(self.uploads_dir, fname)
+                    if os.path.isfile(fpath) and (fname.endswith(".csv") or fname.endswith(".xlsx") or fname.endswith(".xls")):
+                        parts = fname.split("_")
+                        if fname.startswith("ds_") and len(parts) >= 3:
+                            uid = f"{parts[0]}_{parts[1]}"
+                            display_name = "_".join(parts[2:])
                         else:
-                            udf = pd.read_excel(fpath)
-                        self._datasets[uid] = {
-                            "id": uid,
-                            "name": display_name,
-                            "df": udf,
-                            "path": fpath,
-                            "is_synthetic": False,
-                            "created_at": datetime.datetime.fromtimestamp(os.path.getctime(fpath)).isoformat(),
-                        }
-                        # Auto configure
-                        numeric_cols = list(udf.select_dtypes(include=[np.number]).columns)
-                        id_col = self._auto_detect_id_column(udf)
-                        domain = self._auto_detect_domain(udf)
-                        self._configs[uid] = DatasetConfig(
-                            id_column=id_col,
-                            include_columns=numeric_cols,
-                            domain_template=domain,
-                            mi_k=min(8, max(2, len(numeric_cols) - 1)) if numeric_cols else 4,
-                        )
-                    except Exception:
-                        pass
+                            uid = parts[0]
+                            display_name = fname
+                        try:
+                            if fname.endswith(".csv"):
+                                udf = pd.read_csv(fpath)
+                            else:
+                                udf = pd.read_excel(fpath)
+                            self._datasets[uid] = {
+                                "id": uid,
+                                "name": display_name,
+                                "df": udf,
+                                "path": fpath,
+                                "is_synthetic": False,
+                                "real_file_missing": False,
+                                "real_file_path": None,
+                                "created_at": datetime.datetime.fromtimestamp(os.path.getctime(fpath)).isoformat(),
+                            }
+                            numeric_cols = list(udf.select_dtypes(include=[np.number]).columns)
+                            id_col = self._auto_detect_id_column(udf)
+                            domain = self._auto_detect_domain(udf)
+                            self._configs[uid] = DatasetConfig(
+                                id_column=id_col,
+                                include_columns=numeric_cols,
+                                domain_template=domain,
+                                mi_k=min(8, max(2, len(numeric_cols) - 1)) if numeric_cols else 4,
+                            )
+                        except Exception:
+                            pass
 
     def list_datasets(self) -> List[DatasetInfo]:
         """List all available datasets."""
-        res = []
-        for ds_id, data in self._datasets.items():
-            df = data["df"]
-            res.append(
-                DatasetInfo(
-                    id=ds_id,
-                    name=data["name"],
-                    row_count=int(df.shape[0]),
-                    col_count=int(df.shape[1]),
-                    is_synthetic=data.get("is_synthetic", False),
-                    created_at=data.get("created_at", ""),
-                    has_results=ds_id in self._pipeline_instances,
+        with self._lock:
+            res = []
+            for ds_id, data in self._datasets.items():
+                df = data["df"]
+                res.append(
+                    DatasetInfo(
+                        id=ds_id,
+                        name=data["name"],
+                        row_count=int(df.shape[0]),
+                        col_count=int(df.shape[1]),
+                        is_synthetic=data.get("is_synthetic", False),
+                        real_file_missing=data.get("real_file_missing", False),
+                        real_file_path=data.get("real_file_path"),
+                        created_at=data.get("created_at", ""),
+                        has_results=ds_id in self._pipeline_instances,
+                    )
                 )
-            )
-        return res
+            return res
 
     def get_dataset(self, dataset_id: str) -> Tuple[pd.DataFrame, bool, str]:
         """Get dataset DataFrame, is_synthetic flag, and display name."""
-        if dataset_id not in self._datasets:
-            raise HTTPException(status_code=404, detail=f"Dataset with ID '{dataset_id}' not found.")
-        d = self._datasets[dataset_id]
-        return d["df"], d.get("is_synthetic", False), d["name"]
+        validate_identifier(dataset_id, "Dataset ID")
+        with self._lock:
+            if dataset_id not in self._datasets:
+                raise HTTPException(status_code=404, detail=f"Dataset with ID '{dataset_id}' not found.")
+            d = self._datasets[dataset_id]
+            return d["df"], d.get("is_synthetic", False), d["name"]
+
+    def delete_dataset(self, dataset_id: str) -> Dict[str, Any]:
+        """Safely deletes an uploaded dataset, its file, and database records."""
+        validate_identifier(dataset_id, "Dataset ID")
+        if dataset_id == "sample_credit_card":
+            raise HTTPException(status_code=400, detail="Cannot delete built-in benchmark dataset.")
+
+        with self._lock:
+            if dataset_id not in self._datasets:
+                raise HTTPException(status_code=404, detail=f"Dataset with ID '{dataset_id}' not found.")
+
+            data = self._datasets.pop(dataset_id)
+            self._configs.pop(dataset_id, None)
+            self._pipeline_instances.pop(dataset_id, None)
+
+            # Remove file from disk
+            fpath = data.get("path")
+            if fpath and os.path.exists(fpath):
+                try:
+                    os.remove(fpath)
+                except Exception:
+                    pass
+
+            # Remove from SQLite
+            self.db.delete_dataset(dataset_id)
+
+            return {"dataset_id": dataset_id, "deleted": True, "message": f"Dataset {dataset_id} deleted."}
 
     def upload_dataset(self, file: UploadFile) -> DatasetInfo:
         """
         Validate, parse, and store an uploaded dataset.
-        Validates: max 50MB, >= 100 rows, >= 3 numeric columns, handles encodings & delimiters.
+        Security requirements:
+        1. Check extension AND content
+        2. Stream with a hard 50 MB limit
+        3. Max 200,000 rows and max 200 columns
+        4. Random UUID filenames, no user-supplied paths
+        5. XLSX read in safe read-only mode
         """
-        filename = file.filename or "uploaded_data.csv"
-        ext = os.path.splitext(filename)[1].lower()
+        raw_filename = file.filename or "uploaded_data.csv"
+        # Sanitize filename (strip directory components)
+        clean_filename = os.path.basename(raw_filename)
+        ext = os.path.splitext(clean_filename)[1].lower()
+
         if ext not in [".csv", ".xlsx", ".xls", ".txt"]:
             raise HTTPException(
                 status_code=422,
                 detail=f"Unsupported file format '{ext}'. Please upload a CSV (.csv) or Excel (.xlsx, .xls) file.",
             )
 
-        # Read file bytes into memory
-        contents = file.file.read()
+        # Stream with hard 50 MB limit (read in chunks of 64KB)
         max_bytes = 50 * 1024 * 1024  # 50MB
-        if len(contents) > max_bytes:
-            raise HTTPException(
-                status_code=422,
-                detail="File size exceeds maximum allowed limit of 50 MB.",
-            )
+        contents = bytearray()
+        chunk_size = 64 * 1024
 
-        # Parse CSV or Excel
+        while True:
+            chunk = file.file.read(chunk_size)
+            if not chunk:
+                break
+            contents.extend(chunk)
+            if len(contents) > max_bytes:
+                raise HTTPException(
+                    status_code=422,
+                    detail="File size exceeds maximum allowed limit of 50 MB.",
+                )
+
+        # Parse CSV or Excel safely
         df = None
         if ext in [".xlsx", ".xls"]:
             try:
-                df = pd.read_excel(io.BytesIO(contents))
+                # Safe read-only mode with openpyxl
+                wb = openpyxl.load_workbook(io.BytesIO(contents), read_only=True, data_only=True)
+                sheet_names = wb.sheetnames
+                if not sheet_names:
+                    raise ValueError("Workbook contains no sheets")
+                ws = wb[sheet_names[0]]
+                rows = list(ws.iter_rows(values_only=True))
+                wb.close()
+                if not rows or len(rows) < 2:
+                    raise ValueError("Excel sheet has insufficient data rows")
+                header = [str(c) if c is not None else f"col_{i}" for i, c in enumerate(rows[0])]
+                df = pd.DataFrame(rows[1:], columns=header)
             except Exception as e:
                 raise HTTPException(
                     status_code=422,
                     detail=f"Unable to parse Excel workbook: {str(e)}",
                 )
         else:
-            # Try multiple encodings and separators
+            # Check content: verify it's text, not binary executable
+            if b"\x00" in contents[:1024]:
+                raise HTTPException(
+                    status_code=422,
+                    detail="Invalid CSV file content: binary null bytes detected.",
+                )
+
             encodings = ["utf-8", "latin1", "iso-8859-1", "cp1252"]
             parsed = False
             last_err = ""
             for enc in encodings:
                 try:
-                    # Let pandas auto-detect delimiter via python engine
                     df = pd.read_csv(io.BytesIO(contents), encoding=enc, sep=None, engine="python")
                     parsed = True
                     break
@@ -326,15 +473,27 @@ class DatasetManager:
             if not parsed or df is None:
                 raise HTTPException(
                     status_code=422,
-                    detail=f"Failed to parse CSV file across standard encodings (utf-8, latin1): {last_err}",
+                    detail=f"Failed to parse CSV file across standard encodings: {last_err}",
                 )
 
-        # Validate rows >= 100
+        # Validate rows and columns limits
         n_rows = len(df)
+        n_cols = df.shape[1]
+
         if n_rows < 100:
             raise HTTPException(
                 status_code=422,
                 detail=f"Dataset must contain at least 100 records for clustering analysis; received {n_rows} rows.",
+            )
+        if n_rows > 200000:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Dataset exceeds maximum allowed limit of 200,000 records; received {n_rows} rows.",
+            )
+        if n_cols > 200:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Dataset exceeds maximum allowed limit of 200 columns; received {n_cols} columns.",
             )
 
         # Validate numeric columns >= 3
@@ -342,60 +501,75 @@ class DatasetManager:
         if len(numeric_cols) < 3:
             raise HTTPException(
                 status_code=422,
-                detail=f"Dataset must contain at least 3 numeric features for multi-dimensional clustering; detected {len(numeric_cols)} numeric columns ({numeric_cols}).",
+                detail=f"Dataset must contain at least 3 numeric features for multi-dimensional clustering; detected {len(numeric_cols)} numeric columns.",
             )
 
-        # Generate unique dataset ID
+        # Generate unique dataset ID using random UUID
         dataset_id = f"ds_{uuid.uuid4().hex[:8]}"
-        safe_name = re.sub(r"[^\w\.-]", "_", filename)
-        save_path = os.path.join(self.uploads_dir, f"{dataset_id}_{safe_name}")
+        # Ensure filename on disk uses only random UUID without user-supplied paths
+        save_path = os.path.join(self.uploads_dir, f"{dataset_id}.csv")
 
         try:
-            if ext in [".xlsx", ".xls"]:
-                df.to_excel(save_path, index=False)
-            else:
-                df.to_csv(save_path, index=False)
+            df.to_csv(save_path, index=False)
         except Exception:
             pass
 
-        # Register in memory
-        self._datasets[dataset_id] = {
-            "id": dataset_id,
-            "name": filename,
-            "df": df,
-            "path": save_path,
-            "is_synthetic": False,
-            "created_at": datetime.datetime.now().isoformat(),
-        }
+        created_at_str = datetime.datetime.now().isoformat()
+        with self._lock:
+            self._datasets[dataset_id] = {
+                "id": dataset_id,
+                "name": clean_filename,
+                "df": df,
+                "path": save_path,
+                "is_synthetic": False,
+                "real_file_missing": False,
+                "real_file_path": None,
+                "created_at": created_at_str,
+            }
 
-        # Auto-detect sensible defaults
-        id_col = self._auto_detect_id_column(df)
-        domain = self._auto_detect_domain(df)
+            # Save in SQLite
+            self.db.save_dataset(
+                dataset_id=dataset_id,
+                name=clean_filename,
+                row_count=n_rows,
+                col_count=n_cols,
+                is_synthetic=False,
+                real_file_missing=False,
+                real_file_path=None,
+                path=save_path,
+                created_at=created_at_str,
+            )
 
-        self._configs[dataset_id] = DatasetConfig(
-            id_column=id_col,
-            include_columns=numeric_cols,
-            imputation_k=5,
-            iqr_multiplier=1.5,
-            corr_threshold=0.85,
-            mi_k=min(8, max(2, len(numeric_cols) - 1)),
-            pca_variance=0.95,
-            n_clusters=4,
-            domain_template=domain,
-        )
+            id_col = self._auto_detect_id_column(df)
+            domain = self._auto_detect_domain(df)
+
+            cfg = DatasetConfig(
+                id_column=id_col,
+                include_columns=numeric_cols,
+                imputation_k=5,
+                iqr_multiplier=1.5,
+                corr_threshold=0.85,
+                mi_k=min(8, max(2, len(numeric_cols) - 1)),
+                pca_variance=0.95,
+                n_clusters=4,
+                domain_template=domain,
+            )
+            self._configs[dataset_id] = cfg
+            self.db.save_config(dataset_id, cfg.model_dump(), self._compute_config_hash(cfg))
 
         return DatasetInfo(
             id=dataset_id,
-            name=filename,
+            name=clean_filename,
             row_count=n_rows,
-            col_count=int(df.shape[1]),
+            col_count=n_cols,
             is_synthetic=False,
-            created_at=self._datasets[dataset_id]["created_at"],
+            real_file_missing=False,
+            real_file_path=None,
+            created_at=created_at_str,
             has_results=False,
         )
 
     def _auto_detect_id_column(self, df: pd.DataFrame) -> Optional[str]:
-        """Heuristic to detect identifier column."""
         for col in df.columns:
             clow = col.lower()
             if any(term in clow for term in ["cust_id", "customer_id", "user_id", "client_id", "uuid"]):
@@ -405,23 +579,24 @@ class DatasetManager:
         return None
 
     def _auto_detect_domain(self, df: pd.DataFrame) -> str:
-        """Infer business domain based on column signatures."""
         cols_lower = [c.lower() for c in df.columns]
-        # Credit Card checks
         if any("balance" in c for c in cols_lower) and any("purchase" in c for c in cols_lower):
             return "credit_card"
-        # RFM checks
         if any("recency" in c for c in cols_lower) or any("frequency" in c for c in cols_lower) or any("monetary" in c for c in cols_lower):
             return "ecommerce_rfm"
-        # SaaS checks
         if any("mrr" in c for c in cols_lower) or any("seat" in c for c in cols_lower) or any("login" in c for c in cols_lower) or any("churn" in c for c in cols_lower):
             return "saas"
         return "generic"
 
     def profile_dataset(self, dataset_id: str) -> DatasetProfile:
-        """Profile dataset columns, detect dtypes, missing values, unique values, suggested roles, and 10-row preview."""
+        validate_identifier(dataset_id, "Dataset ID")
         df, is_synthetic, name = self.get_dataset(dataset_id)
         n_rows = len(df)
+
+        with self._lock:
+            ds_data = self._datasets.get(dataset_id, {})
+            real_file_missing = ds_data.get("real_file_missing", False)
+            real_file_path = ds_data.get("real_file_path")
 
         col_profiles: List[ColumnProfile] = []
         for col in df.columns:
@@ -430,11 +605,9 @@ class DatasetManager:
             missing_pct = round(float((missing / n_rows) * 100.0), 2)
             uniques = int(df[col].nunique(dropna=True))
 
-            # Sample values (up to 5)
             sample_non_null = df[col].dropna().head(5).tolist()
             sample_vals = [str(x) if not isinstance(x, (int, float, bool)) else x for x in sample_non_null]
 
-            # Suggested role
             clow = col.lower()
             is_numeric = pd.api.types.is_numeric_dtype(df[col])
 
@@ -467,9 +640,7 @@ class DatasetManager:
                 )
             )
 
-        # 10-row preview
         preview_df = df.head(10).copy()
-        # Clean preview for JSON compliance
         preview_records = []
         for _, row in preview_df.iterrows():
             rec = {}
@@ -490,28 +661,36 @@ class DatasetManager:
             row_count=n_rows,
             col_count=int(df.shape[1]),
             is_synthetic=is_synthetic,
+            real_file_missing=real_file_missing,
+            real_file_path=real_file_path,
             columns=col_profiles,
             preview=preview_records,
         )
 
     def get_config(self, dataset_id: str) -> DatasetConfig:
-        """Get dataset configuration."""
-        if dataset_id not in self._configs:
-            self._configs[dataset_id] = DatasetConfig()
-        return self._configs[dataset_id]
+        validate_identifier(dataset_id, "Dataset ID")
+        with self._lock:
+            if dataset_id not in self._configs:
+                saved = self.db.get_config(dataset_id)
+                if saved:
+                    self._configs[dataset_id] = DatasetConfig(**saved[0])
+                else:
+                    self._configs[dataset_id] = DatasetConfig()
+            return self._configs[dataset_id]
 
     def configure_dataset(self, dataset_id: str, config: DatasetConfig) -> ConfigResponse:
-        """Save configuration and invalidate cached pipeline instances."""
-        if dataset_id not in self._datasets:
-            raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found.")
+        validate_identifier(dataset_id, "Dataset ID")
+        with self._lock:
+            if dataset_id not in self._datasets:
+                raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found.")
 
-        self._configs[dataset_id] = config
+            self._configs[dataset_id] = config
+            if dataset_id in self._pipeline_instances:
+                del self._pipeline_instances[dataset_id]
 
-        # Invalidate pipeline instance for this dataset
-        if dataset_id in self._pipeline_instances:
-            del self._pipeline_instances[dataset_id]
+            config_hash = self._compute_config_hash(config)
+            self.db.save_config(dataset_id, config.model_dump(), config_hash)
 
-        config_hash = self._compute_config_hash(config)
         return ConfigResponse(
             dataset_id=dataset_id,
             config_hash=config_hash,
@@ -520,7 +699,6 @@ class DatasetManager:
         )
 
     def _compute_config_hash(self, config: DatasetConfig) -> str:
-        """Generate a deterministic config hash."""
         import hashlib
         import json
         cfg_dict = config.model_dump()
@@ -528,20 +706,21 @@ class DatasetManager:
         return hashlib.md5(raw.encode("utf-8")).hexdigest()[:12]
 
     def get_pipeline(self, dataset_id: str = "sample_credit_card") -> Any:
-        """Get or lazily instantiate the PulseSegmentPipeline for a dataset."""
-        if dataset_id not in self._datasets:
-            if "sample_credit_card" in self._datasets:
-                dataset_id = "sample_credit_card"
-            else:
-                raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found.")
+        validate_identifier(dataset_id, "Dataset ID")
+        with self._lock:
+            if dataset_id not in self._datasets:
+                if "sample_credit_card" in self._datasets:
+                    dataset_id = "sample_credit_card"
+                else:
+                    raise HTTPException(status_code=404, detail=f"Dataset '{dataset_id}' not found.")
 
-        cfg = self.get_config(dataset_id)
-        cfg_hash = self._compute_config_hash(cfg)
+            cfg = self.get_config(dataset_id)
+            cfg_hash = self._compute_config_hash(cfg)
 
-        if dataset_id in self._pipeline_instances:
-            pipe, existing_hash = self._pipeline_instances[dataset_id]
-            if existing_hash == cfg_hash:
-                return pipe
+            if dataset_id in self._pipeline_instances:
+                pipe, existing_hash = self._pipeline_instances[dataset_id]
+                if existing_hash == cfg_hash:
+                    return pipe
 
         from pipeline import PulseSegmentPipeline
         df, is_synthetic, _ = self.get_dataset(dataset_id)
@@ -550,7 +729,8 @@ class DatasetManager:
             config=cfg,
             dataset_id=dataset_id,
             is_synthetic=is_synthetic,
+            db=self.db,
         )
-        self._pipeline_instances[dataset_id] = (pipe, cfg_hash)
+        with self._lock:
+            self._pipeline_instances[dataset_id] = (pipe, cfg_hash)
         return pipe
-

@@ -28,6 +28,7 @@ ENV/
 .coverage
 htmlcov/
 *.joblib
+*.db
 
 # Uploaded user datasets
 backend/data/uploads/
