@@ -10,15 +10,15 @@ import {
   FeatureEngineering,
   ExperimentsMatrix,
   GrowthPersonas,
+  PersonaProfile,
   JobStatus,
 } from '@/lib/api'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { StepStepper, StepId } from '@/components/step-stepper'
 import { Step1Data } from '@/components/step1-data'
-import { Step2Prepare } from '@/components/step2-prepare'
-import { Step3Benchmark } from '@/components/step3-benchmark'
-import { Step4Explore } from '@/components/step4-explore'
-import { Step5Act } from '@/components/step5-act'
+import { Step2Groups } from '@/components/step2-groups'
+import { Step3Act } from '@/components/step3-act'
+import { MethodologyView } from '@/components/methodology-view'
 import { HelpDrawer } from '@/components/help-drawer'
 import { CoachMarks } from '@/components/coach-marks'
 import {
@@ -26,10 +26,9 @@ import {
   Plus,
   Check,
   ChevronDown,
-  Database,
-  Loader2,
-  AlertCircle,
   Sparkles,
+  AlertCircle,
+  Sliders,
 } from 'lucide-react'
 
 export default function Home() {
@@ -41,14 +40,30 @@ export default function Home() {
 }
 
 function PulseSegmentApp() {
-  // Stepper state with URL search param sync
+  // 3-Screen Flow + Methodology view
   const [currentStep, setCurrentStep] = useState<StepId>(() => {
     if (typeof window !== 'undefined') {
       const sp = new URLSearchParams(window.location.search).get('step') as StepId
-      if (sp && ['data', 'prepare', 'benchmark', 'explore', 'act'].includes(sp)) return sp
+      if (sp && ['data', 'groups', 'act', 'methodology'].includes(sp)) return sp
     }
     return 'data'
   })
+
+  // Advanced details toggle (off by default, remembered in localStorage)
+  const [showAdvanced, setShowAdvanced] = useState<boolean>(false)
+
+  useEffect(() => {
+    const saved = localStorage.getItem('pulsesegment_advanced_mode')
+    if (saved === 'true') {
+      setShowAdvanced(true)
+    }
+  }, [])
+
+  const toggleAdvanced = () => {
+    const nextVal = !showAdvanced
+    setShowAdvanced(nextVal)
+    localStorage.setItem('pulsesegment_advanced_mode', nextVal ? 'true' : 'false')
+  }
 
   // Datasets state
   const [datasets, setDatasets] = useState<DatasetInfo[]>([])
@@ -70,10 +85,20 @@ function PulseSegmentApp() {
   const [matrix, setMatrix] = useState<ExperimentsMatrix | null>(null)
   const [personas, setPersonas] = useState<GrowthPersonas | null>(null)
 
+  // Custom group names persisted in session
+  const [customNames, setCustomNames] = useState<Record<number, string>>({})
+  const handleUpdateCustomName = (id: number, name: string) => {
+    setCustomNames((prev) => ({ ...prev, [id]: name }))
+  }
+
+  // Active group selected for campaign
+  const [selectedGroupIdx, setSelectedGroupIdx] = useState<number>(0)
+
   // Background Job & Loading states
-  const [activeJobId, setActiveJobId] = useState<string | null>(null)
-  const [jobStatus, setJobStatus] = useState<JobStatus | null>(null)
-  const [isBenchmarkRunning, setIsBenchmarkRunning] = useState<boolean>(false)
+  const [isFindingGroups, setIsFindingGroups] = useState<boolean>(false)
+  const [progressMessage, setProgressMessage] = useState<string>(
+    'Cleaning your data... Trying different methods... Choosing the best'
+  )
   const [pageLoading, setPageLoading] = useState<boolean>(true)
   const [errorNotice, setErrorNotice] = useState<string | null>(null)
   const [toast, setToast] = useState<{ message: string; type?: 'info' | 'warning' | 'error' } | null>(null)
@@ -104,7 +129,7 @@ function PulseSegmentApp() {
         setActiveDatasetId(dsParam)
         return
       }
-      if (stepParam && ['data', 'prepare', 'benchmark', 'explore', 'act'].includes(stepParam)) {
+      if (stepParam && ['data', 'groups', 'act', 'methodology'].includes(stepParam)) {
         if (!pageLoading) {
           const hasBenchmarkResults = Boolean(
             matrix &&
@@ -112,14 +137,14 @@ function PulseSegmentApp() {
             matrix.experiments &&
             matrix.experiments.length > 0
           )
-          if ((stepParam === 'explore' || stepParam === 'act') && !hasBenchmarkResults) {
-            setCurrentStep('benchmark')
+          if ((stepParam === 'groups' || stepParam === 'act') && !hasBenchmarkResults) {
+            setCurrentStep('data')
             setToast({
-              message: 'Locked step: Run the 16-experiment benchmark first before accessing personas and action playbooks.',
+              message: 'Locked step: Find customer groups first before exploring segments or campaigns.',
               type: 'warning',
             })
             const url = new URL(window.location.href)
-            url.searchParams.set('step', 'benchmark')
+            url.searchParams.set('step', 'data')
             window.history.replaceState({}, '', url.toString())
             return
           }
@@ -129,22 +154,25 @@ function PulseSegmentApp() {
     }
   }, [matrix, pageLoading, activeDatasetId])
 
+  const matrixRef = useRef<ExperimentsMatrix | null>(null)
+
   const setStep = (step: StepId) => {
+    const activeMatrix = matrixRef.current || matrix
     const hasBenchmarkResults = Boolean(
-      matrix &&
-      matrix.dataset_id === activeDatasetId &&
-      matrix.experiments &&
-      matrix.experiments.length > 0
+      activeMatrix &&
+      activeMatrix.dataset_id === activeDatasetId &&
+      activeMatrix.experiments &&
+      activeMatrix.experiments.length > 0
     )
-    if ((step === 'explore' || step === 'act') && !hasBenchmarkResults) {
+    if ((step === 'groups' || step === 'act') && !hasBenchmarkResults) {
       setToast({
-        message: 'Locked step: Run the 16-experiment benchmark first before accessing personas and action playbooks.',
+        message: 'Locked step: Click "Find my customer groups" first.',
         type: 'warning',
       })
-      setCurrentStep('benchmark')
+      setCurrentStep('data')
       if (typeof window !== 'undefined') {
         const url = new URL(window.location.href)
-        url.searchParams.set('step', 'benchmark')
+        url.searchParams.set('step', 'data')
         window.history.pushState({}, '', url.toString())
       }
       return
@@ -162,6 +190,7 @@ function PulseSegmentApp() {
     setActiveDatasetId(dsId)
     setMatrix(null)
     setPersonas(null)
+    setCustomNames({})
     if (typeof window !== 'undefined') {
       const url = new URL(window.location.href)
       url.searchParams.set('dataset', dsId)
@@ -202,39 +231,29 @@ function PulseSegmentApp() {
     setPageLoading(true)
     setErrorNotice(null)
     try {
+      const dsMeta = datasets.find((d) => d.id === dsId)
+      const shouldFetchExperiments = dsMeta ? Boolean(dsMeta.has_results) : true
+
       const [profData, cfgData, expData] = await Promise.all([
         api.getProfile(dsId).catch(() => null),
         api.getConfig(dsId).catch(() => null),
-        api.experimentsMatrix(dsId).catch(() => null),
+        shouldFetchExperiments ? api.experimentsMatrix(dsId).catch(() => null) : Promise.resolve(null),
       ])
+
       if (profData) setProfile(profData)
       if (cfgData) setConfig(cfgData)
 
-      // Immediately enforce locked step check if benchmark not run
       if (expData && expData.experiments && expData.experiments.length > 0) {
+        matrixRef.current = expData
         setMatrix(expData)
         const persData = await api.growthPersonas(dsId).catch(() => null)
         if (persData) setPersonas(persData)
       } else {
+        matrixRef.current = null
         setMatrix(null)
         setPersonas(null)
-        const urlStep = typeof window !== 'undefined' ? (new URLSearchParams(window.location.search).get('step') as StepId) : null
-        const targetStep = urlStep || currentStep
-        if (targetStep === 'explore' || targetStep === 'act') {
-          setCurrentStep('benchmark')
-          setToast({
-            message: 'Locked step: Run the 16-experiment benchmark first before accessing personas and action playbooks.',
-            type: 'warning',
-          })
-          if (typeof window !== 'undefined') {
-            const url = new URL(window.location.href)
-            url.searchParams.set('step', 'benchmark')
-            window.history.replaceState({}, '', url.toString())
-          }
-        }
       }
 
-      // Load summary & feature engineering
       const [sumData, featData] = await Promise.all([
         api.datasetSummary(dsId).catch(() => null),
         api.featureEngineering(dsId).catch(() => null),
@@ -261,38 +280,57 @@ function PulseSegmentApp() {
     }
   }
 
-  // Start 16-experiment benchmark background job
-  const handleStartBenchmark = async () => {
-    if (isBenchmarkRunning) return
-    setIsBenchmarkRunning(true)
-    setStep('benchmark')
+  // Automated "Find my customer groups" orchestrator
+  const handleFindCustomerGroups = async () => {
+    if (isFindingGroups || !activeDatasetId) return
+    setIsFindingGroups(true)
+    setErrorNotice(null)
+    setProgressMessage('Cleaning your data... Trying different methods... Choosing the best')
 
     try {
-      const jobInfo = await api.runBenchmark(activeDatasetId)
-      setActiveJobId(jobInfo.job_id)
+      // 1. Ensure latest configuration is saved
+      if (config) {
+        await api.configureDataset(activeDatasetId, config)
+      }
 
-      // Poll job status every 500ms
+      // 2. Trigger the multi-algorithm benchmark job
+      const jobInfo = await api.runBenchmark(activeDatasetId)
+
+      // 3. Poll job status until completed
       if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
       pollIntervalRef.current = setInterval(async () => {
         try {
           const status = await api.getJobStatus(jobInfo.job_id)
-          setJobStatus(status)
 
           if (status.status === 'completed') {
             if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
-            setIsBenchmarkRunning(false)
-            // Fetch completed results
-            const [matrixRes, personasRes] = await Promise.all([
+            setIsFindingGroups(false)
+
+            // Fetch completed matrix & personas
+            const [matrixRes, personasRes, sumRes, featRes] = await Promise.all([
               api.experimentsMatrix(activeDatasetId),
               api.growthPersonas(activeDatasetId),
+              api.datasetSummary(activeDatasetId).catch(() => null),
+              api.featureEngineering(activeDatasetId).catch(() => null),
             ])
+            matrixRef.current = matrixRes
             setMatrix(matrixRes)
             setPersonas(personasRes)
+            if (sumRes) setSummary(sumRes)
+            if (featRes) setFeatures(featRes)
+
+            // Transition smoothly to Screen 2: Your customer groups
+            setCurrentStep('groups')
+            if (typeof window !== 'undefined') {
+              const url = new URL(window.location.href)
+              url.searchParams.set('step', 'groups')
+              window.history.pushState({}, '', url.toString())
+            }
           } else if (status.status === 'failed' || status.status === 'cancelled') {
             if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
-            setIsBenchmarkRunning(false)
+            setIsFindingGroups(false)
             if (status.status === 'failed') {
-              setErrorNotice(status.error || 'Benchmark run failed.')
+              setErrorNotice(status.error || 'Grouping failed. Please check customer data columns.')
             }
           }
         } catch {
@@ -300,36 +338,31 @@ function PulseSegmentApp() {
         }
       }, 500)
     } catch (err: any) {
-      setIsBenchmarkRunning(false)
-      setErrorNotice(err.message || 'Failed to trigger benchmark')
+      setIsFindingGroups(false)
+      setErrorNotice(err.message || 'Failed to start customer grouping')
     }
   }
 
-  const handleCancelBenchmark = async () => {
-    if (activeJobId) {
-      await api.cancelJob(activeJobId).catch(() => {})
-      if (pollIntervalRef.current) clearInterval(pollIntervalRef.current)
-      setIsBenchmarkRunning(false)
-    }
-  }
-
-  // Re-run benchmark with new k
-  const handleRerunWithK = async (k: number) => {
-    if (!config) return
-    const updated = { ...config, n_clusters: k }
-    setConfig(updated)
-    await api.configureDataset(activeDatasetId, updated)
-    await handleStartBenchmark()
+  // Plan campaign for a specific customer group
+  const handlePlanCampaign = (persona: PersonaProfile) => {
+    const idx = personas?.personas.findIndex((p) => (p.id ?? p.name) === (persona.id ?? persona.name)) ?? 0
+    setSelectedGroupIdx(Math.max(0, idx))
+    setStep('act')
   }
 
   const activeDataset = datasets.find((d) => d.id === activeDatasetId) || datasets[0]
-  const numericFeaturesList = profile?.columns
-    .filter((c) => c.suggested_role === 'numeric_feature' && (!config?.include_columns || config.include_columns.includes(c.name)))
-    .map((c) => c.name) || []
+  const numericFeaturesList =
+    profile?.columns
+      .filter(
+        (c) =>
+          c.suggested_role === 'numeric_feature' &&
+          (!config?.include_columns || config.include_columns.includes(c.name))
+      )
+      .map((c) => c.name) || []
 
   return (
     <div className="min-h-screen bg-[var(--bg)] text-[var(--text)] flex flex-col font-sans transition-colors selection:bg-accent-indigo selection:text-white">
-      {/* Hidden file input for "+ Add dataset" */}
+      {/* Hidden file input */}
       <input
         ref={hiddenUploadRef}
         type="file"
@@ -342,12 +375,15 @@ function PulseSegmentApp() {
         }}
       />
 
-      {/* Top Bar (Frosted, Sticky) */}
+      {/* Top Header (Sticky, Frosted) */}
       <header className="sticky top-0 z-40 glass-header bg-[#FAFAFA]/85 dark:bg-[#09090B]/85 border-b border-[var(--border)] transition-colors">
-        <div className="max-w-[1200px] mx-auto px-6 h-14 flex items-center justify-between">
-          {/* Left: Brand Logo + Dataset Selector */}
+        <div className="max-w-[1100px] mx-auto px-6 h-14 flex items-center justify-between">
+          {/* Left: Brand Logo + Dataset Dropdown */}
           <div className="flex items-center gap-4">
-            <span className="text-sm font-bold tracking-tight flex items-center gap-1.5 cursor-pointer" onClick={() => setStep('data')}>
+            <span
+              className="text-sm font-bold tracking-tight flex items-center gap-1.5 cursor-pointer"
+              onClick={() => setStep('data')}
+            >
               <span className="text-accent-indigo text-base">◆</span>
               PulseSegment AI
             </span>
@@ -357,16 +393,17 @@ function PulseSegmentApp() {
               <button
                 type="button"
                 onClick={() => setDatasetDropdownOpen(!datasetDropdownOpen)}
-                className="flex items-center gap-2 px-3 py-1.5 rounded-lg bg-[var(--card)] border border-[var(--border)] hover:border-accent-indigo/60 text-xs transition-colors shadow-sm"
+                className="flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[var(--card)] border border-[var(--border)] hover:border-accent-indigo/60 text-xs transition-colors shadow-sm"
               >
                 <span className="w-2 h-2 rounded-full bg-accent-emerald pulse-dot shrink-0" />
                 <span className="font-semibold text-[var(--text)] max-w-[160px] truncate">
                   {activeDataset?.name || 'Select Dataset'}
                 </span>
                 <span className="text-[var(--text-muted)] font-mono text-[11px]">
-                  {activeDataset?.row_count ? `${activeDataset.row_count.toLocaleString()} × ${activeDataset.col_count}` : ''}
+                  {activeDataset?.row_count ? `${activeDataset.row_count.toLocaleString()} customers` : ''}
                 </span>
 
+                {/* Persistent small "Demo data" badge when is_synthetic is true */}
                 {activeDataset?.is_synthetic && (
                   <span className="px-2 py-0.5 rounded-full text-[10px] font-semibold bg-amber-500/15 text-amber-500 dark:text-amber-400 border border-amber-500/30 flex items-center gap-1 shadow-sm">
                     <span className="w-1.5 h-1.5 rounded-full bg-amber-400 animate-pulse" />
@@ -379,8 +416,8 @@ function PulseSegmentApp() {
 
               {/* Dropdown Menu */}
               {datasetDropdownOpen && (
-                <div className="absolute top-full left-0 mt-1.5 w-72 bg-[var(--card)] border border-[var(--border)] rounded-xl shadow-xl p-1.5 z-50 text-xs animate-fadeIn">
-                  <div className="px-2 py-1 text-[10px] uppercase font-bold text-[var(--text-muted)]">
+                <div className="absolute top-full left-0 mt-1.5 w-72 bg-[var(--card)] border border-[var(--border)] rounded-2xl shadow-xl p-1.5 z-50 text-xs animate-fadeIn">
+                  <div className="px-2.5 py-1 text-[10px] uppercase font-bold text-[var(--text-muted)]">
                     Available Datasets
                   </div>
 
@@ -393,7 +430,7 @@ function PulseSegmentApp() {
                           selectDataset(d.id)
                           setDatasetDropdownOpen(false)
                         }}
-                        className={`w-full text-left px-2.5 py-2 rounded-lg flex items-center justify-between transition-colors ${
+                        className={`w-full text-left px-2.5 py-2 rounded-xl flex items-center justify-between transition-colors ${
                           d.id === activeDatasetId
                             ? 'bg-accent-indigo/10 text-accent-indigo font-semibold'
                             : 'hover:bg-[var(--card-elevated)] text-[var(--text)]'
@@ -420,7 +457,7 @@ function PulseSegmentApp() {
                         setDatasetDropdownOpen(false)
                         hiddenUploadRef.current?.click()
                       }}
-                      className="w-full text-left px-2.5 py-1.5 rounded-lg hover:bg-[var(--card-elevated)] text-accent-indigo font-medium flex items-center gap-1.5 transition-colors"
+                      className="w-full text-left px-2.5 py-1.5 rounded-xl hover:bg-[var(--card-elevated)] text-accent-indigo font-medium flex items-center gap-1.5 transition-colors"
                     >
                       <Plus className="w-3.5 h-3.5" />
                       + Add new dataset (CSV or XLSX)
@@ -431,12 +468,28 @@ function PulseSegmentApp() {
             </div>
           </div>
 
-          {/* Right: Help Button + Theme Toggle */}
+          {/* Right: Advanced Details Toggle + Help Button + Theme Toggle */}
           <div className="flex items-center gap-2.5">
+            {/* Advanced details toggle */}
+            <button
+              type="button"
+              onClick={toggleAdvanced}
+              className={`px-2.5 py-1.5 rounded-xl border text-xs font-medium flex items-center gap-1.5 transition-colors ${
+                showAdvanced
+                  ? 'bg-accent-indigo/15 border-accent-indigo text-accent-indigo'
+                  : 'bg-[var(--card)] border-[var(--border)] text-[var(--text-muted)] hover:text-[var(--text)]'
+              }`}
+              title="Show advanced technical settings and metrics"
+            >
+              <Sliders className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Advanced details</span>
+            </button>
+
+            {/* Help Button */}
             <button
               type="button"
               onClick={() => setHelpOpen(true)}
-              className="p-2 rounded-lg hover:bg-[var(--card)] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors border border-transparent hover:border-[var(--border)] text-xs flex items-center gap-1"
+              className="p-2 rounded-xl hover:bg-[var(--card)] text-[var(--text-muted)] hover:text-[var(--text)] transition-colors border border-transparent hover:border-[var(--border)] text-xs flex items-center gap-1"
               title="Help & Guide"
             >
               <HelpCircle className="w-4 h-4" />
@@ -448,23 +501,22 @@ function PulseSegmentApp() {
         </div>
       </header>
 
-      {/* Main Container - Centered max-w-[1200px] with 24/32px spacing */}
-      <main className="flex-1 max-w-[1200px] w-full mx-auto px-6 py-8 space-y-8">
+      {/* Main Content Area: max-w-[1100px] with 24/32px spacing */}
+      <main className="flex-1 max-w-[1100px] w-full mx-auto px-6 py-8 space-y-8">
         {/* First-Run Coach Marks */}
         <CoachMarks />
 
-        {/* 5-Step Progress Stepper */}
+        {/* 3-Step Progress Stepper + 'How we got these results' link */}
         <StepStepper
           currentStep={currentStep}
           onSelectStep={setStep}
           hasData={!!activeDataset}
-          hasPrepared={!!summary && !!features}
-          hasBenchmark={!!matrix && matrix.experiments.length > 0}
+          hasBenchmark={!!matrix && matrix.experiments && matrix.experiments.length > 0}
         />
 
-        {/* Inline Global Error Notice if any */}
+        {/* Error Notice Banner */}
         {errorNotice && (
-          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-start justify-between gap-2.5 animate-fadeIn">
+          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs flex items-start justify-between gap-3 animate-fadeIn">
             <div className="flex items-start gap-2">
               <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-500" />
               <span>{errorNotice}</span>
@@ -478,59 +530,55 @@ function PulseSegmentApp() {
           </div>
         )}
 
-        {/* Active Step Content */}
+        {/* SCREEN 1: Add data */}
         {currentStep === 'data' && (
           <Step1Data
             currentDataset={activeDataset || null}
             profile={profile}
             config={config}
-            onDatasetChange={setActiveDatasetId}
+            onDatasetChange={selectDataset}
             onConfigChange={setConfig}
-            onAdvanceToPrepare={() => {
-              loadDatasetData(activeDatasetId)
-              setStep('prepare')
-            }}
+            onFindCustomerGroups={handleFindCustomerGroups}
+            isFindingGroups={isFindingGroups}
+            progressMessage={progressMessage}
             isUploading={isUploading}
             onUploadFile={handleFileUpload}
+            showAdvanced={showAdvanced}
           />
         )}
 
-        {currentStep === 'prepare' && (
-          <Step2Prepare
-            summary={summary}
-            features={features}
-            config={config}
-            onAdvanceToBenchmark={handleStartBenchmark}
-          />
-        )}
-
-        {currentStep === 'benchmark' && (
-          <Step3Benchmark
+        {/* SCREEN 2: Your customer groups */}
+        {currentStep === 'groups' && (
+          <Step2Groups
+            personasData={personas}
             matrix={matrix}
-            jobStatus={jobStatus}
-            isRunning={isBenchmarkRunning}
-            onRunBenchmark={handleStartBenchmark}
-            onCancelJob={handleCancelBenchmark}
-            onAdvanceToExplore={() => setStep('explore')}
+            onPlanCampaign={handlePlanCampaign}
+            onViewMethodology={() => setStep('methodology')}
+            customNames={customNames}
+            onUpdateCustomName={handleUpdateCustomName}
           />
         )}
 
-        {currentStep === 'explore' && (
-          <Step4Explore
-            matrix={matrix}
-            personas={personas}
-            config={config}
-            datasetId={activeDatasetId}
-            onRerunWithK={handleRerunWithK}
-            onAdvanceToAct={() => setStep('act')}
-          />
-        )}
-
+        {/* SCREEN 3: Take action */}
         {currentStep === 'act' && (
-          <Step5Act
+          <Step3Act
             personasData={personas}
             datasetId={activeDatasetId}
             numericFeatures={numericFeaturesList}
+            selectedGroupIndex={selectedGroupIdx}
+            customNames={customNames}
+            showAdvanced={showAdvanced}
+          />
+        )}
+
+        {/* METHODOLOGY: How we got these results */}
+        {currentStep === 'methodology' && (
+          <MethodologyView
+            matrix={matrix}
+            summary={summary}
+            features={features}
+            personas={personas}
+            onBack={() => setStep(matrix?.experiments?.length ? 'groups' : 'data')}
           />
         )}
       </main>
@@ -538,11 +586,11 @@ function PulseSegmentApp() {
       {/* Help Slide-Over Drawer */}
       <HelpDrawer open={helpOpen} onClose={() => setHelpOpen(false)} />
 
-      {/* Toast Notification for Locked Steps & Warnings */}
+      {/* Toast Notification */}
       {toast && (
         <div
           role="alert"
-          className="fixed bottom-6 right-6 z-50 max-w-sm p-4 rounded-xl bg-zinc-950/95 text-zinc-100 border border-amber-500/50 shadow-2xl backdrop-blur-md flex items-start gap-3 animate-fadeIn"
+          className="fixed bottom-6 right-6 z-50 max-w-sm p-4 rounded-2xl bg-zinc-950/95 text-zinc-100 border border-amber-500/50 shadow-2xl backdrop-blur-md flex items-start gap-3 animate-fadeIn"
         >
           <AlertCircle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
           <div className="flex-1 text-xs">

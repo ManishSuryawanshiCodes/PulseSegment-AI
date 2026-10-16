@@ -29,6 +29,9 @@ ENV/
 htmlcov/
 *.joblib
 *.db
+*.db-shm
+*.db-wal
+
 
 # Uploaded user datasets
 backend/data/uploads/

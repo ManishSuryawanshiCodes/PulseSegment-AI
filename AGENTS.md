@@ -43,3 +43,35 @@ We are building "PulseSegment AI" — an enterprise-grade, dataset-agnostic Cust
    - Z-score relative to global mean with top 3 positive and top 3 negative distinguishing attributes.
    - Domain templates (`credit_card`, `ecommerce_rfm`, `saas`, `generic`).
    - Dynamic ROI calculated from segment counts and user assumptions.
+
+## Non-Technical UI Redesign & Wording Directives
+- **Core Principle:** Show only what non-technical users need by default. All mathematical/technical pipeline details (16-method benchmark, elbow curves, box plots, heatmaps, raw PCA/IQR parameters) live inside a dedicated "How we got these results" view accessible via link, or behind an "Advanced details" toggle (persisted in localStorage, off by default).
+- **3-Screen Streamlined Default Flow:**
+  1. **Screen 1 (Add data):** Big dropzone, "Try demo data", "Download template". Post-upload summary: file name, customer count, column count, 5-row preview, plain English warnings ("2% of values were missing, we'll fill them in"), "What kind of business is this?" domain picker with icons. Advanced settings drawer/accordion for ID column and column include/exclude. One primary action button: `"Find my customer groups"` that automatically triggers cleaning, multi-algorithm benchmarking, and winning model persona extraction with friendly progress messages (*"Cleaning your data... Trying different methods... Choosing the best"*).
+  2. **Screen 2 (Your customer groups):** Headline *"We found {k} customer groups"*, one-line dynamic quality badge (*Strong*, *Good*, *Fair*, *Weak* based on Group clarity / Silhouette with actionable advice for Fair/Weak). Single horizontal stacked distribution bar. Responsive cards (4 across, 2 across, 1 across) with inline editable group names, customer count & percentage, 1-sentence description, 3 plain English distinguishing points, 5-level arrow indicators (*Much lower*, *Lower*, *Average*, *Higher*, *Much higher* replacing raw z-score bars), real-unit typical customer highlights, and a *"Plan campaign"* button. No `#0` index badges, "of base", or raw z-score terms.
+  3. **Screen 3 (Take action):** Per customer group: recommended offer, copyable multi-channel copy (Email, SMS, Push). Dynamic ROI calculator with inputs: *"Average yearly revenue per customer"*, *"Expected improvement (%)"*, *"Cost per customer"*, displaying *"Extra revenue"* and *"Return on spend"*. Actions: *"Download customer list with groups (CSV)"*, *"Check one customer"*, and an advanced dropdown for *"Download model"*.
+- **Non-Technical Wording Dictionary (Enforced across UI & Help):**
+  - Persona -> Customer group
+  - Centroid -> Typical customer
+  - NBA -> Recommended offer
+  - Silhouette Score -> Group clarity (higher is better)
+  - Davies-Bouldin Index -> Group overlap (lower is better)
+  - Calinski-Harabasz -> Separation strength (higher is better)
+  - z-score -> Compared with average
+  - Winsorization -> Capping unusual values
+  - KNN Imputation -> Filling in missing values
+  - Standardization -> Putting columns on the same scale
+  - PCA -> Simplified data
+  - Mutual Information -> Most useful columns
+  - Benchmark -> Compare methods
+  - Pseudo-labels -> Hidden from default view
+  - Feature spaces (DS1-DS4) -> Data versions (*All columns*, *Without duplicates*, *Most useful columns*, *Simplified*)
+  - No raw LaTeX formulas or mathematical notation in the default UI. Every metric has a `(?)` tooltip with a one-sentence intuitive explanation and indication whether higher or lower is better.
+- **Visual Polish & Ergonomics:**
+  - Maximum content width: `max-w-[1100px]`.
+  - Generous spacing (24px / 32px padding and gaps).
+  - Typography: Body text >= 14px, labels >= 12px, sentence-case labels (no aggressive uppercase), monospace strictly reserved for numbers.
+  - WCAG AA contrast in both obsidian dark mode and light mode.
+  - Persistent *"Demo data"* badge whenever `is_synthetic` is active.
+  - 3 first-run coach marks and slide-over Help drawer with 3-step guide, 6-term glossary, and CSV format requirements.
+
